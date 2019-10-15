@@ -13,7 +13,29 @@ const CLOSURE_PTR_SIZE: usize = mem::size_of::<fn()>();
 const CLOSURE_STORAGE_SIZE: usize = CLOSURE_HOLDER_SIZE - CLOSURE_PTR_SIZE;
 
 type StaticClosureStorage = [u8; CLOSURE_STORAGE_SIZE];
-type ClosureExecutor = fn(&[u8], *const ());
+type ClosureExecutorFn = fn(&[u8], *const ());
+
+enum ClosureExecutor {
+    None,
+    FnOnce(ClosureExecutorFn),
+    Fn(ClosureExecutorFn),
+}
+
+impl ClosureExecutor {
+    fn is_some(&self) -> bool {
+        match self {
+            ClosureExecutor::None => false,
+            _ => true,
+        }
+    }
+
+    fn is_fn(&self) -> bool {
+        match self {
+            ClosureExecutor::Fn(_) => true,
+            _ => false,
+        }
+    }
+}
 
 /// (Unsafe) wrapper for a closure/function pointer with a single type- and lifetime-erased reference argument.
 ///
@@ -35,7 +57,7 @@ type ClosureExecutor = fn(&[u8], *const ());
 /// [`execute`]: #method.execute
 pub struct ClosureHolder {
     storage: ClosureStorage,
-    executor: Option<ClosureExecutor>,
+    executor: ClosureExecutor,
 }
 
 enum ClosureStorage {
@@ -49,12 +71,14 @@ impl ClosureHolder {
     /// Creates an empty holder.
     pub fn empty() -> Self {
         ClosureHolder {
-            executor: None,
+            executor: ClosureExecutor::None,
             storage: ClosureStorage::Static(MaybeUninit::<StaticClosureStorage>::uninit()),
         }
     }
 
     /// Creates a holder which contains the closure `f` for later execution.
+    ///
+    /// Stored closure may be executed multiple times.
     ///
     /// # Safety
     ///
@@ -65,14 +89,58 @@ impl ClosureHolder {
     /// [`execute`]: #method.execute
     pub unsafe fn new<'any, F, ARG>(f: F) -> Self
     where
-        F: FnOnce(&ARG) + 'any,
+        F: FnMut(&ARG) + 'any,
     {
         let mut result = ClosureHolder::empty();
         result.store(f);
         result
     }
 
+    /// Creates a holder which contains the closure `f` for later execution.
+    ///
+    /// Stored closure may only be executed once.
+    ///
+    /// # Safety
+    ///
+    /// The caller guarantees that the closure
+    /// does not outlive its borrows, if any, until the following call to [`execute`].
+    /// The caller guarantees that the following call to [`execute`] passes the correct argument type.
+    ///
+    /// [`execute`]: #method.execute
+    pub unsafe fn once<'any, F, ARG>(f: F) -> Self
+    where
+        F: FnOnce(&ARG) + 'any,
+    {
+        let mut result = ClosureHolder::empty();
+        result.store_once(f);
+        result
+    }
+
     /// Stores the closure `f` in the holder for later execution.
+    ///
+    /// Stored closure may only be executed once.
+    ///
+    /// # Safety
+    ///
+    /// The caller guarantees that the closure
+    /// does not outlive its borrows, if any, until the following call to [`execute`].
+    /// The caller guarantees that the following call to [`execute`] passes the correct argument type.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the holder already contains a closure.
+    ///
+    /// [`execute`]: #method.execute
+    pub unsafe fn store_once<'any, F, ARG>(&mut self, f: F)
+    where
+        F: FnOnce(&ARG) + 'any,
+    {
+        self.store_impl(f, true);
+    }
+
+    /// Stores the closure `f` in the holder for later execution.
+    ///
+    /// Stored closure may be executed multiple times.
     ///
     /// # Safety
     ///
@@ -87,9 +155,16 @@ impl ClosureHolder {
     /// [`execute`]: #method.execute
     pub unsafe fn store<'any, F, ARG>(&mut self, f: F)
     where
+        F: FnMut(&ARG) + 'any,
+    {
+        self.store_impl(f, false);
+    }
+
+    pub unsafe fn store_impl<'any, F, ARG>(&mut self, f: F, once: bool)
+    where
         F: FnOnce(&ARG) + 'any,
     {
-        assert!(!self.is_some());
+        assert!(!self.is_some(), "Tried to store a closure in an occupied `ClosureHolder`.");
 
         let size = mem::size_of::<F>();
 
@@ -117,15 +192,41 @@ impl ClosureHolder {
             f(arg);
         };
 
-        self.executor = Some(executor);
+        self.executor = if once {
+            ClosureExecutor::FnOnce(executor)
+        } else {
+            ClosureExecutor::Fn(executor)
+        };
     }
 
-    /// If the holder is not empty, returns `true`; otherwise returns `false`.
+    /// If the `ClosureHolder` is not empty, returns `true`; otherwise returns `false`.
     pub fn is_some(&self) -> bool {
         self.executor.is_some()
     }
 
-    /// If the holder is not empty, executes the stored closure and returns `true`; otherwise returns `false`.
+    /// If the `ClosureHolder` is not empty, executes the stored closure and returns `true`; otherwise returns `false`.
+    ///
+    /// If the closure was stored via [`once`] \ [`store_once`], the `ClosureHolder` becomes empty after the closure is executed.
+    ///
+    /// # Safety
+    ///
+    /// The caller guarantees that the function is passed the same argument type
+    /// as the one used in the previous call to [`new`] \ [`once`] \ [`store`] \ [`store_once`].
+    ///
+    /// [`new`]: #method.new
+    /// [`once`]: #method.once
+    /// [`store`]: #method.store
+    /// [`store_once`]: #method.store_once
+    pub unsafe fn try_execute_once<'any, ARG>(&mut self, arg: &'any ARG) -> bool {
+        if self.is_some() {
+            self.execute_once(arg);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// If the `ClosureHolder` is not empty and was stored via [`new`] \ [`store`], executes the stored closure and returns `true`; otherwise returns `false`.
     ///
     /// # Safety
     ///
@@ -134,9 +235,8 @@ impl ClosureHolder {
     ///
     /// [`new`]: #method.new
     /// [`store`]: #method.store
-    #[cfg(test)]
-    pub unsafe fn try_execute<'any, ARG>(&mut self, arg: &'any ARG) -> bool {
-        if self.is_some() {
+    pub unsafe fn try_execute<'any, ARG>(&self, arg: &'any ARG) -> bool {
+        if self.executor.is_fn() {
             self.execute(arg);
             true
         } else {
@@ -146,6 +246,56 @@ impl ClosureHolder {
 
     /// Executes the stored closure unconditionally.
     ///
+    /// If the closure was stored via [`once`] \ [`store_once`], the `ClosureHolder` becomes empty after the closure is executed.
+    ///
+    /// # Safety
+    ///
+    /// The caller guarantees that the function is passed the same argument type
+    /// as the one used in the previous call to [`new`] \ [`once`] \ [`store`] \ [`store_once`].
+    ///
+    /// # Panics
+    ///
+    /// Panics if the `ClosureHolder` is empty.
+    ///
+    /// [`new`]: #method.new
+    /// [`once`]: #method.once
+    /// [`store`]: #method.store
+    /// [`store_once`]: #method.store_once
+    pub unsafe fn execute_once<'any, ARG>(&mut self, arg: &'any ARG) {
+        let arg: *const () = mem::transmute(arg);
+
+        let (executor, once) = match self.executor {
+            ClosureExecutor::None => panic!("Tried to execute an empty closure."),
+            ClosureExecutor::FnOnce(executor) => {
+                let executor = executor;
+                self.executor = ClosureExecutor::None;
+                (executor, true)
+            },
+            ClosureExecutor::Fn(executor) => (executor, false),
+        };
+
+        match &mut self.storage {
+            ClosureStorage::Static(storage) => {
+                let storage = &*storage.as_ptr();
+                executor(storage, arg);
+            },
+            ClosureStorage::Dynamic(storage) => {
+                if once {
+                    let storage = storage.take().expect("Tried to execute an empty closure.");
+                    let storage = &*storage;
+                    executor(storage, arg);
+                } else {
+                    let storage = &*storage.as_ref().expect("Tried to execute an empty closure.");
+                    executor(storage, arg);
+                }
+            },
+        }
+    }
+
+    /// Executes the stored closure unconditionally.
+    ///
+    /// May only be called for closures stored via [`new`] \ [`store`].
+    ///
     /// # Safety
     ///
     /// The caller guarantees that the function is passed the same argument type
@@ -153,29 +303,32 @@ impl ClosureHolder {
     ///
     /// # Panics
     ///
-    /// Panics if the holder is empty.
+    /// Panics if the `ClosureHolder` is empty.
+    /// Panics if the closure was stored via [`once`] \ [`store_once`].
     ///
     /// [`new`]: #method.new
+    /// [`once`]: #method.once
     /// [`store`]: #method.store
-    pub unsafe fn execute<'any, ARG>(&mut self, arg: &'any ARG) {
+    /// [`store_once`]: #method.store_once
+    pub unsafe fn execute<'any, ARG>(&self, arg: &'any ARG) {
         let arg: *const () = mem::transmute(arg);
 
-        match &mut self.storage {
+        let executor = match self.executor {
+            ClosureExecutor::None => panic!("Tried to execute an empty closure."),
+            ClosureExecutor::FnOnce(_) => panic!("Tried to execute an `FnOnce` closure via `execute`."),
+            ClosureExecutor::Fn(executor) => executor,
+        };
+
+        match &self.storage {
             ClosureStorage::Static(storage) => {
                 let storage = &*storage.as_ptr();
-                (self
-                    .executor
-                    .take()
-                    .expect("Tried to execute an empty closure."))(storage, arg);
-            }
+                executor(storage, arg);
+            },
             ClosureStorage::Dynamic(storage) => {
-                let storage = &*storage.take().expect("Tried to execute an empty closure.");
-                (self
-                    .executor
-                    .take()
-                    .expect("Tried to execute an empty closure."))(storage, arg);
-            }
-        };
+                let storage = &*storage.as_ref().expect("Tried to execute an empty closure.");
+                executor(storage, arg);
+            },
+        }
     }
 }
 
@@ -191,7 +344,7 @@ mod tests {
         assert!(!h.is_some());
 
         unsafe {
-            assert!(!h.try_execute(&arg));
+            assert!(!h.try_execute_once(&arg));
         }
     }
 
@@ -204,60 +357,75 @@ mod tests {
         assert!(!h.is_some());
 
         unsafe {
-            assert!(!h.try_execute(&arg));
-            h.execute(&arg);
+            assert!(!h.try_execute_once(&arg));
+            h.execute_once(&arg);
         }
     }
 
     #[test]
-    fn basic() {
+    #[should_panic(expected = "Tried to store a closure in an occupied `ClosureHolder`.")]
+    fn double_store() {
+        let mut h = unsafe {
+            ClosureHolder::once(|_arg: &usize| println!("Hello"))
+        };
+
+        unsafe {
+            h.store_once(|_arg: &usize| println!(" world!"));
+        }
+    }
+
+    #[test]
+    fn basic_once() {
         // Move closure.
         let x = 7;
         let mut y = 0;
 
         let mut h = unsafe {
-            ClosureHolder::new(move |_arg: &usize| {
-                y = x + 24;
+            ClosureHolder::once(move |arg: &usize| {
                 assert_eq!(x, 7);
-                assert_eq!(y, 7 + 24);
+                assert_eq!(y, 0);
+                assert_eq!(*arg, 9);
+
+                y = x + *arg;
             })
         };
 
-        let arg = 7usize;
+        let arg = 9usize;
 
         assert!(h.is_some());
 
         unsafe {
-            h.execute(&arg);
+            h.execute_once(&arg);
         }
+
+        assert_eq!(y, 0);
 
         assert!(!h.is_some());
 
         unsafe {
-            assert!(!h.try_execute(&arg));
+            assert!(!h.try_execute_once(&arg));
         }
 
-        assert_eq!(x, 7);
-        assert_eq!(y, 0);
-
         unsafe {
-            h.store(move |_arg: &usize| {
-                y = x + 9;
+            h.store_once(move |arg: &usize| {
                 assert_eq!(x, 7);
-                assert_eq!(y, 7 + 9);
+                assert_eq!(y, 0);
+                assert_eq!(*arg, 9);
+
+                y = x + *arg;
             });
         }
 
         assert!(h.is_some());
 
         unsafe {
-            h.execute(&arg);
+            h.execute_once(&arg);
         }
 
         assert!(!h.is_some());
 
         unsafe {
-            assert!(!h.try_execute(&arg));
+            assert!(!h.try_execute_once(&arg));
         }
 
         assert_eq!(x, 7);
@@ -268,7 +436,10 @@ mod tests {
         static FORTY_TWO: usize = 42;
 
         let mut g = unsafe {
-            ClosureHolder::new(|_arg: &usize| {
+            ClosureHolder::once(|_arg: &usize| {
+                assert_eq!(HELLO, "Hello");
+                assert_eq!(FORTY_TWO, 42);
+
                 println!("{} {}", HELLO, FORTY_TWO);
             })
         };
@@ -276,15 +447,15 @@ mod tests {
         assert!(g.is_some());
 
         unsafe {
-            g.execute(&arg);
+            g.execute_once(&arg);
         }
 
         assert!(!g.is_some());
 
         unsafe {
-            assert!(!g.try_execute(&arg));
+            assert!(!g.try_execute_once(&arg));
 
-            g.store(|_arg: &usize| {
+            g.store_once(|_arg: &usize| {
                 println!("{} {}", "Hello", 42);
             });
         }
@@ -292,14 +463,47 @@ mod tests {
         assert!(g.is_some());
 
         unsafe {
-            g.execute(&arg);
+            g.execute_once(&arg);
         }
 
         assert!(!g.is_some());
 
         unsafe {
-            assert!(!g.try_execute(&arg));
+            assert!(!g.try_execute_once(&arg));
         }
+    }
+
+    #[test]
+    fn basic() {
+        let x = 7;
+        let mut y = 0;
+
+        let h = unsafe {
+            ClosureHolder::new(|arg: &usize| {
+                assert_eq!(x, 7);
+                assert_eq!(*arg, 9);
+
+                y = y + x + *arg;
+            })
+        };
+
+        let arg = 9usize;
+
+        assert!(h.is_some());
+
+        unsafe {
+            h.execute(&arg);
+        }
+
+        assert_eq!(y, 7 + 9);
+
+        assert!(h.is_some());
+
+        unsafe {
+            assert!(h.try_execute(&arg));
+        }
+
+        assert_eq!(y, 7 + 9 + 7 + 9);
     }
 
     #[test]
@@ -307,9 +511,35 @@ mod tests {
         let large_capture = [0u8; CLOSURE_HOLDER_SIZE];
 
         let mut h =
-            unsafe { ClosureHolder::new(move |_arg: &usize| println!("{}", large_capture.len())) };
+            unsafe { ClosureHolder::once(move |_arg: &usize| println!("{}", large_capture.len())) };
 
         let arg = 7usize;
+
+        unsafe {
+            h.execute_once(&arg);
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "Tried to execute an `FnOnce` closure via `execute`.")]
+    fn execute_once() {
+        // Move closure.
+        let x = 7;
+        let mut y = 0;
+
+        let h = unsafe {
+            ClosureHolder::once(move |arg: &usize| {
+                assert_eq!(x, 7);
+                assert_eq!(y, 0);
+                assert_eq!(*arg, 9);
+
+                y = x + *arg;
+            })
+        };
+
+        let arg = 9usize;
+
+        assert!(h.is_some());
 
         unsafe {
             h.execute(&arg);
