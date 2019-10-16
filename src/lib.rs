@@ -296,6 +296,7 @@ impl ClosureHolder {
         self.store_mut_impl(f, true);
     }
 
+    /// If the `ClosureHolder` is not empty, returns `true`; otherwise returns `false`.
     pub fn is_none(&self) -> bool {
         self.executor.is_none()
     }
