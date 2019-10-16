@@ -440,27 +440,30 @@ impl ClosureHolder {
         let arg: *const () = mem::transmute(arg);
 
         let executor = match self.executor {
-            ClosureExecutor::None =>
-                panic!("Tried to execute an empty closure."),
-            ClosureExecutor::FnOnce(_) =>
-                panic!("Tried to execute an `FnOnce` closure via `execute`."),
-            ClosureExecutor::FnMut(_) =>
-                panic!("Tried to execute a mutable closure via `execute`."),
-            ClosureExecutor::FnOnceMut(_) =>
-                panic!("Tried to execute an `FnOnce mutable closure via `execute`."),
-            ClosureExecutor::Fn(executor) =>
-                executor,
+            ClosureExecutor::None => panic!("Tried to execute an empty closure."),
+            ClosureExecutor::FnOnce(_) => {
+                panic!("Tried to execute an `FnOnce` closure via `execute`.")
+            }
+            ClosureExecutor::FnMut(_) => {
+                panic!("Tried to execute a mutable closure via `execute`.")
+            }
+            ClosureExecutor::FnOnceMut(_) => {
+                panic!("Tried to execute an `FnOnce mutable closure via `execute`.")
+            }
+            ClosureExecutor::Fn(executor) => executor,
         };
 
         match &self.storage {
             ClosureStorage::Static(storage) => {
                 let storage = &*storage.as_ptr();
                 executor(storage, arg);
-            },
+            }
             ClosureStorage::Dynamic(storage) => {
-                let storage = &*storage.as_ref().expect("Tried to execute an empty closure.");
+                let storage = &*storage
+                    .as_ref()
+                    .expect("Tried to execute an empty closure.");
                 executor(storage, arg);
-            },
+            }
         }
     }
 
@@ -486,31 +489,33 @@ impl ClosureHolder {
         let arg: *const () = mem::transmute(arg);
 
         let executor = match self.executor {
-            ClosureExecutor::None =>
-                panic!("Tried to execute an empty closure."),
-            ClosureExecutor::Fn(_) =>
-                panic!("Tried to execute a non-`FnOnce` closure via `execute_once`."),
-            ClosureExecutor::FnMut(_) =>
-                panic!("Tried to execute a non-`FnOnce` mutable closure via `execute_once`."),
-            ClosureExecutor::FnOnceMut(_) =>
-                panic!("Tried to execute a mutable closure via `execute_once`."),
+            ClosureExecutor::None => panic!("Tried to execute an empty closure."),
+            ClosureExecutor::Fn(_) => {
+                panic!("Tried to execute a non-`FnOnce` closure via `execute_once`.")
+            }
+            ClosureExecutor::FnMut(_) => {
+                panic!("Tried to execute a non-`FnOnce` mutable closure via `execute_once`.")
+            }
+            ClosureExecutor::FnOnceMut(_) => {
+                panic!("Tried to execute a mutable closure via `execute_once`.")
+            }
             ClosureExecutor::FnOnce(executor) => {
                 let executor = executor;
                 self.executor = ClosureExecutor::None;
                 executor
-            },
+            }
         };
 
         match &mut self.storage {
             ClosureStorage::Static(storage) => {
                 let storage = &*storage.as_ptr();
                 executor(storage, arg);
-            },
+            }
             ClosureStorage::Dynamic(storage) => {
                 let storage = storage.take().expect("Tried to execute an empty closure.");
                 let storage = &*storage;
                 executor(storage, arg);
-            },
+            }
         }
     }
 
@@ -534,27 +539,30 @@ impl ClosureHolder {
         let arg: *mut () = mem::transmute(arg);
 
         let executor = match self.executor {
-            ClosureExecutor::None =>
-                panic!("Tried to execute an empty closure."),
-            ClosureExecutor::Fn(_) =>
-                panic!("Tried to execute an immutable closure via `execute_mut`."),
-            ClosureExecutor::FnOnce(_) =>
-                panic!("Tried to execute an `FnOnce` immutable closure via `execute_mut`."),
-            ClosureExecutor::FnOnceMut(_) =>
-                panic!("Tried to execute an `FnOnce` mutable closure via `execute_mut`."),
-            ClosureExecutor::FnMut(executor) =>
-                executor,
+            ClosureExecutor::None => panic!("Tried to execute an empty closure."),
+            ClosureExecutor::Fn(_) => {
+                panic!("Tried to execute an immutable closure via `execute_mut`.")
+            }
+            ClosureExecutor::FnOnce(_) => {
+                panic!("Tried to execute an `FnOnce` immutable closure via `execute_mut`.")
+            }
+            ClosureExecutor::FnOnceMut(_) => {
+                panic!("Tried to execute an `FnOnce` mutable closure via `execute_mut`.")
+            }
+            ClosureExecutor::FnMut(executor) => executor,
         };
 
         match &self.storage {
             ClosureStorage::Static(storage) => {
                 let storage = &*storage.as_ptr();
                 executor(storage, arg);
-            },
+            }
             ClosureStorage::Dynamic(storage) => {
-                let storage = &*storage.as_ref().expect("Tried to execute an empty closure.");
+                let storage = &*storage
+                    .as_ref()
+                    .expect("Tried to execute an empty closure.");
                 executor(storage, arg);
-            },
+            }
         }
     }
 
@@ -580,31 +588,33 @@ impl ClosureHolder {
         let arg: *mut () = mem::transmute(arg);
 
         let executor = match self.executor {
-            ClosureExecutor::None =>
-                panic!("Tried to execute an empty closure."),
-            ClosureExecutor::Fn(_) =>
-                panic!("Tried to execute a non-`FnOnce` immutable closure via `execute_once_mut`."),
-            ClosureExecutor::FnMut(_) =>
-                panic!("Tried to execute a non-`FnOnce` mutable closure via `execute_once_mut`."),
-            ClosureExecutor::FnOnce(_) =>
-                panic!("Tried to execute an immutable closure via `execute_once_mut`."),
+            ClosureExecutor::None => panic!("Tried to execute an empty closure."),
+            ClosureExecutor::Fn(_) => {
+                panic!("Tried to execute a non-`FnOnce` immutable closure via `execute_once_mut`.")
+            }
+            ClosureExecutor::FnMut(_) => {
+                panic!("Tried to execute a non-`FnOnce` mutable closure via `execute_once_mut`.")
+            }
+            ClosureExecutor::FnOnce(_) => {
+                panic!("Tried to execute an immutable closure via `execute_once_mut`.")
+            }
             ClosureExecutor::FnOnceMut(executor) => {
                 let executor = executor;
                 self.executor = ClosureExecutor::None;
                 executor
-            },
+            }
         };
 
         match &mut self.storage {
             ClosureStorage::Static(storage) => {
                 let storage = &*storage.as_ptr();
                 executor(storage, arg);
-            },
+            }
             ClosureStorage::Dynamic(storage) => {
                 let storage = storage.take().expect("Tried to execute an empty closure.");
                 let storage = &*storage;
                 executor(storage, arg);
-            },
+            }
         }
     }
 
@@ -612,7 +622,10 @@ impl ClosureHolder {
     where
         F: FnOnce(&ARG) + 'any,
     {
-        assert!(self.is_none(), "Tried to store a closure in an occupied `ClosureHolder`.");
+        assert!(
+            self.is_none(),
+            "Tried to store a closure in an occupied `ClosureHolder`."
+        );
 
         self.storage = ClosureHolder::store_closure(f);
 
@@ -623,7 +636,10 @@ impl ClosureHolder {
     where
         F: FnOnce(&mut ARG) + 'any,
     {
-        assert!(self.is_none(), "Tried to store a closure in an occupied `ClosureHolder`.");
+        assert!(
+            self.is_none(),
+            "Tried to store a closure in an occupied `ClosureHolder`."
+        );
 
         self.storage = ClosureHolder::store_closure(f);
 
@@ -725,9 +741,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "Tried to store a closure in an occupied `ClosureHolder`.")]
     fn double_store() {
-        let mut h = unsafe {
-            ClosureHolder::new(|_arg: &usize| println!("Hello"))
-        };
+        let mut h = unsafe { ClosureHolder::new(|_arg: &usize| println!("Hello")) };
 
         unsafe {
             h.store(|_arg: &usize| println!(" world!"));
@@ -737,9 +751,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "Tried to store a closure in an occupied `ClosureHolder`.")]
     fn double_store_once() {
-        let mut h = unsafe {
-            ClosureHolder::once(|_arg: &usize| println!("Hello"))
-        };
+        let mut h = unsafe { ClosureHolder::once(|_arg: &usize| println!("Hello")) };
 
         unsafe {
             h.store_once(|_arg: &usize| println!(" world!"));
