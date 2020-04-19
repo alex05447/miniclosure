@@ -216,9 +216,8 @@ impl ClosureHolder {
     {
         self.store_impl(
             ClosureExecutor::Fn(|storage, arg| {
-                let arg: &A = &*(arg as *const _);
-
-                let f: &mut F = &mut *(storage.as_mut_ptr() as *mut _);
+                let f: &mut F = Self::closure(storage);
+                let arg = Self::arg(arg);
 
                 f(arg);
             }),
@@ -248,9 +247,8 @@ impl ClosureHolder {
     {
         self.store_impl(
             ClosureExecutor::FnMut(|storage, arg| {
-                let arg: &mut A = &mut *(arg as *mut _);
-
-                let f: &mut F = &mut *(storage.as_mut_ptr() as *mut _);
+                let f: &mut F = Self::closure(storage);
+                let arg = Self::arg_mut(arg);
 
                 f(arg);
             }),
@@ -280,9 +278,8 @@ impl ClosureHolder {
     {
         self.store_impl(
             ClosureExecutor::FnOnce(|storage, arg| {
-                let arg: &A = &*(arg as *const _);
-
-                let f = ptr::read::<F>(storage.as_mut_ptr() as *mut _);
+                let f: F = Self::closure_once(storage);
+                let arg = Self::arg(arg);
 
                 f(arg);
             }),
@@ -312,9 +309,8 @@ impl ClosureHolder {
     {
         self.store_impl(
             ClosureExecutor::FnOnceMut(|storage, arg| {
-                let arg: &mut A = &mut *(arg as *mut _);
-
-                let f = ptr::read::<F>(storage.as_mut_ptr() as *mut _);
+                let f: F = Self::closure_once(storage);
+                let arg = Self::arg_mut(arg);
 
                 f(arg);
             }),
@@ -675,6 +671,22 @@ impl ClosureHolder {
 
         self.executor = e;
         self.storage = ClosureHolder::store_closure(f);
+    }
+
+    unsafe fn arg<'a, A>(arg: *const ()) -> &'a A {
+        &*(arg as *const _)
+    }
+
+    unsafe fn arg_mut<'a, A>(arg: *mut ()) -> &'a mut A {
+        &mut *(arg as *mut _)
+    }
+
+    unsafe fn closure<'a, F>(storage: &mut [u8]) -> &'a mut F {
+        &mut *(storage.as_mut_ptr() as *mut _)
+    }
+
+    unsafe fn closure_once<F>(storage: &mut [u8]) -> F {
+        ptr::read::<F>(storage.as_mut_ptr() as *mut _)
     }
 
     #[cfg(test)]
