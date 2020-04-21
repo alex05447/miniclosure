@@ -1,71 +1,188 @@
-use std::mem::{self, MaybeUninit};
+use std::mem::{self, size_of};
 use std::ptr;
 
-/// Total amount of memory used by the [`StaticClosureHolder`]
-/// x86: 4b (executor function pointer) + 60b (closure storage) = 64b
-/// x64: 8b (executor function pointer) + 56b (closure storage) = 64b
-/// [`StaticClosureHolder`]: #struct.StaticClosureHolder
-const CLOSURE_HOLDER_SIZE: usize = 64;
-const CLOSURE_PTR_SIZE: usize = mem::size_of::<fn()>();
-const CLOSURE_STORAGE_SIZE: usize = CLOSURE_HOLDER_SIZE - CLOSURE_PTR_SIZE;
+use static_assertions::{const_assert_eq, assert_eq_size};
+use strum_macros::EnumCount;
+use num_derive::{FromPrimitive, ToPrimitive};
 
-type StaticClosureStorage = [u8; CLOSURE_STORAGE_SIZE];
+/// Static function which
+/// 1) unpacks the correct closure type from the raw byte buffer,
+/// 2) casts the argument ptr to the expected argument type,
+/// 3) executes the closure.
+///
+/// Gets passed the raw closure capture buffer from the [`ClosureHolder`], static or dynamic,
+/// and the pointer to type-erased closure argument.
+/// It's up to the user to ensure the argument is of type the closure expects.
+///
+/// [`ClosureHolder`]: #struct.ClosureHolder.html
+type Executor = fn(&mut [u8], *mut ());
 
-type ClosureExecutorFn = fn(&mut [u8], *const ());
-type ClosureExecutorFnMut = fn(&mut [u8], *mut ());
+/// Static function which
+/// 1) unpacks the correct closure type from the raw byte buffer,
+/// 2) drops it.
+///
+/// Gets passed the raw closure capture buffer from the [`ClosureHolder`], static or dynamic.
+///
+/// [`ClosureHolder`]: #struct.ClosureHolder.html
+type DropHandler = fn(&mut [u8]);
 
-enum ClosureExecutor {
-    None,
-    /// `FnMut` closure. Single immutable ref arg. Executes multiple times.
-    Fn(ClosureExecutorFn),
-    /// `FnOnce` closure. Single immutable ref arg. Executes once.
-    FnOnce(ClosureExecutorFn),
-    /// `FnMut` closure. Single mutable ref arg. Executes multiple times.
-    FnMut(ClosureExecutorFnMut),
-    /// `FnOnce` closure. Single mutable ref arg. Executes once.
-    FnOnceMut(ClosureExecutorFnMut),
+/// Total amount of memory used by the [`ClosureHolder`]
+///
+/// [`ClosureHolder`]: #struct.ClosureHolder.html
+const HOLDER_SIZE: usize = 64;
+
+const EXECUTOR_SIZE: usize = size_of::<Executor>();
+const DROP_HANDLER_SIZE: usize = size_of::<DropHandler>();
+const DISCRIMINANT_SIZE: usize = size_of::<u8>();
+
+/// Amount of memory left for closure capture storage left in the [`ClosureHolder`].
+///
+/// x86: 4b (executor func ptr) + 4b (drop handler func pointer) + 1b (discriminant) + 55b (closure storage) = 64b
+/// x64: 8b (executor func ptr) + 8b (drop handler func pointer) + 1b (discriminant) + 47b (closure storage) = 64b
+///
+/// [`ClosureHolder`]: #struct.ClosureHolder.html
+const STORAGE_SIZE: usize =
+    HOLDER_SIZE /* 64b */
+    - EXECUTOR_SIZE /* 4b / 8b -> 60b / 56b */
+    - DISCRIMINANT_SIZE /* 1b -> 59b / 55b */
+    - DROP_HANDLER_SIZE /* 4b / 8b -> 55b / 47b */;
+
+/// Raw byte buffer used to store the closure capture, if it fits in `STORAGE_SIZE` bytes.
+#[repr(C, packed(1))]
+#[derive(Clone, Copy)] // `Copy` needed for union storage.
+struct StaticStorage([u8; STORAGE_SIZE]);
+
+const_assert_eq!(size_of::<StaticStorage>(), STORAGE_SIZE);
+
+/// Heap-allocated buffer used to store the closure capture, if it does not fit in `STORAGE_SIZE` bytes.
+#[repr(C, packed(1))]
+#[derive(Clone, Copy)] // `Copy` needed for union storage.
+//struct DynamicStorage(*mut u8, usize);
+struct DynamicStorage(*mut [u8]);
+
+const_assert_eq!(size_of::<DynamicStorage>(), size_of::<usize>() * 2); // Fat pointer.
+
+/// Closure capture storage.
+/// Static or dynamic.
+/// Tag/discriminant is encoded separately.
+#[repr(C, packed(1))]
+union StorageUnion {
+    _static: StaticStorage,
+    _dynamic: DynamicStorage,
 }
 
-impl ClosureExecutor {
+impl Default for StorageUnion {
+    fn default() -> Self {
+        Self {
+            _static: unsafe { StaticStorage(mem::zeroed()) }
+        }
+    }
+}
+
+assert_eq_size!(StorageUnion, StaticStorage);
+
+/// Explicit storage union tag, encoded separately.
+#[derive(Clone, Copy, Eq, Debug, PartialEq, EnumCount, FromPrimitive, ToPrimitive)]
+enum StorageTag {
+    Static = 0, Dynamic
+}
+
+/// Explicit executor union tag, encoded separately.
+#[derive(EnumCount, FromPrimitive, ToPrimitive)]
+enum ExecutorTag {
+    None = 0,
+    /// `FnMut` closure. Single immutable ref arg. Executes multiple times.
+    //Fn(ClosureExecutorFn),
+    Fn,
+    /// `FnOnce` closure. Single immutable ref arg. Executes once.
+    //FnOnce(ClosureExecutorFn),
+    FnOnce,
+    /// `FnMut` closure. Single mutable ref arg. Executes multiple times.
+    FnMut,
+    /// `FnOnce` closure. Single mutable ref arg. Executes once.
+    FnOnceMut,
+}
+
+impl ExecutorTag {
     fn is_none(&self) -> bool {
         match self {
-            ClosureExecutor::None => true,
+            ExecutorTag::None => true,
             _ => false,
         }
     }
 
     fn is_some(&self) -> bool {
         match self {
-            ClosureExecutor::Fn(_) => true,
+            ExecutorTag::Fn => true,
             _ => false,
         }
     }
 
     fn is_once(&self) -> bool {
         match self {
-            ClosureExecutor::FnOnce(_) => true,
+            ExecutorTag::FnOnce => true,
             _ => false,
         }
     }
 
     fn is_mut(&self) -> bool {
         match self {
-            ClosureExecutor::FnMut(_) => true,
+            ExecutorTag::FnMut => true,
             _ => false,
         }
     }
 
     fn is_once_mut(&self) -> bool {
         match self {
-            ClosureExecutor::FnOnceMut(_) => true,
+            ExecutorTag::FnOnceMut => true,
             _ => false,
         }
     }
 }
 
+const STORAGE_TAG_OFFSET: u8 = 0;
+const STORAGE_TAG_BITS: u8 = num_bits(STORAGETAG_COUNT as u8);
+const_assert_eq!(STORAGE_TAG_BITS, 1);
+const STORAGE_TAG_MASK: u8 = (1 << STORAGE_TAG_BITS) - 1;
+
+const EXECUTOR_TAG_OFFSET: u8 = STORAGE_TAG_OFFSET + STORAGE_TAG_BITS;
+const EXECUTOR_TAG_BITS: u8 = num_bits(EXECUTORTAG_COUNT as u8);
+const_assert_eq!(EXECUTOR_TAG_BITS, 3);
+const EXECUTOR_TAG_MASK: u8 = (1 << EXECUTOR_TAG_BITS) - 1;
+
+/// Closure holder discriminant.
+/// Encodes storage union tag and executor union tag.
+///
+/// . . . . e e e s
+#[repr(transparent)]
+#[derive(Clone, Copy)]
+struct Discriminant(u8);
+
+impl Discriminant {
+    fn new(storage: StorageTag, executor: ExecutorTag) -> Self {
+        use num_traits::ToPrimitive;
+        Self((storage.to_u8().unwrap() & STORAGE_TAG_MASK) << STORAGE_TAG_OFFSET
+        | (executor.to_u8().unwrap() & EXECUTOR_TAG_MASK) << EXECUTOR_TAG_OFFSET)
+    }
+
+    fn storage_tag(self) -> StorageTag {
+        use num_traits::FromPrimitive;
+        StorageTag::from_u8(read_bits(self.0, STORAGE_TAG_BITS, STORAGE_TAG_OFFSET)).unwrap()
+    }
+
+    fn executor_tag(self) -> ExecutorTag {
+        use num_traits::FromPrimitive;
+        ExecutorTag::from_u8(read_bits(self.0, EXECUTOR_TAG_BITS, EXECUTOR_TAG_OFFSET)).unwrap()
+    }
+
+    fn set_executor_tag(&mut self, executor: ExecutorTag) {
+        *self = Discriminant::new(self.storage_tag(), executor);
+    }
+}
+
 /// (Unsafe) wrapper for a closure/function pointer with a single type- and lifetime-erased reference argument.
 ///
-/// Internally uses the small function optimization, providing 56b / 60b of closure storage space on x64 / x86.
+/// Internally uses the small function optimization, providing 47b / 55b of closure storage space on x64 / x86.
 ///
 /// # Safety
 ///
@@ -75,9 +192,8 @@ impl ClosureExecutor {
 /// Stores closures with any lifetime. It is up to the caller to guarantee that any
 /// borrows live until the call to [`execute`] \ [`execute_mut`] \ [`execute_once`] \ [`execute_once_mut`].
 ///
-/// Static storage size (`CLOSURE_STORAGE_SIZE`) is determined by `CLOSURE_HOLDER_SIZE` constant and the platform function pointer size.
-/// Namely, up to `CLOSURE_HOLDER_SIZE - mem::size_of<fn()>` bytes are used to store the closure in the object.
-/// Closures larger than `CLOSURE_STORAGE_SIZE` are stored on the heap.
+/// Static storage size (`STORAGE_SIZE`) is determined by `HOLDER_SIZE` constant and the platform function pointer size.
+/// Closures larger than `STORAGE_SIZE` are stored on the heap.
 ///
 /// [`new`]: #method.new
 /// [`new_mut`]: #method.new_mut
@@ -91,22 +207,26 @@ impl ClosureExecutor {
 /// [`execute_mut`]: #method.execute_mut
 /// [`execute_once`]: #method.execute_once
 /// [`execute_once_mut`]: #method.execute_once_mut
+#[repr(C, packed(1))]
 pub struct ClosureHolder {
-    storage: ClosureStorage,
-    executor: ClosureExecutor,
+    executor: Executor,         // offs 0b          size 4b / 8b
+    drop_handler: DropHandler,  // offs 4b / 8b     size 4b / 8b
+    storage: StorageUnion,      // offs 8b / 16b    size 55b / 47b
+    discriminant: Discriminant, // offs 63b         size 1b
 }
 
-enum ClosureStorage {
-    Static(MaybeUninit<StaticClosureStorage>),
-    Dynamic(Option<Box<[u8]>>),
-}
+const_assert_eq!(size_of::<ClosureHolder>(), HOLDER_SIZE);
 
 impl ClosureHolder {
-    /// Creates an empty `ClosureHolder`.
+    /// Creates an empty [`ClosureHolder`].
+    ///
+    /// [`ClosureHolder`]: #struct.ClosureHolder.html
     pub fn empty() -> Self {
         ClosureHolder {
-            executor: ClosureExecutor::None,
-            storage: ClosureStorage::Static(MaybeUninit::<StaticClosureStorage>::uninit()),
+            executor: |_, _| {},
+            drop_handler: |_|{},
+            storage: Default::default(),
+            discriminant: Discriminant::new(StorageTag::Static, ExecutorTag::None),
         }
     }
 
@@ -126,7 +246,7 @@ impl ClosureHolder {
     where
         F: FnMut(&A) + 'a,
     {
-        let mut result = ClosureHolder::empty();
+        let mut result = Self::empty();
         result.store(f);
         result
     }
@@ -147,7 +267,7 @@ impl ClosureHolder {
     where
         F: FnMut(&mut A) + 'a,
     {
-        let mut result = ClosureHolder::empty();
+        let mut result = Self::empty();
         result.store_mut(f);
         result
     }
@@ -168,7 +288,7 @@ impl ClosureHolder {
     where
         F: FnOnce(&A) + 'a,
     {
-        let mut result = ClosureHolder::empty();
+        let mut result = Self::empty();
         result.store_once(f);
         result
     }
@@ -189,7 +309,7 @@ impl ClosureHolder {
     where
         F: FnOnce(&mut A) + 'a,
     {
-        let mut result = ClosureHolder::empty();
+        let mut result = Self::empty();
         result.store_once_mut(f);
         result
     }
@@ -215,12 +335,10 @@ impl ClosureHolder {
         F: FnMut(&A) + 'a,
     {
         self.store_impl(
-            ClosureExecutor::Fn(|storage, arg| {
-                let f: &mut F = Self::closure(storage);
-                let arg = Self::arg(arg);
-
-                f(arg);
-            }),
+            |storage, arg| {
+                (Self::closure::<F>(storage))(Self::arg(arg));
+            },
+            ExecutorTag::Fn,
             f,
         );
     }
@@ -246,12 +364,10 @@ impl ClosureHolder {
         F: FnMut(&mut A) + 'a,
     {
         self.store_impl(
-            ClosureExecutor::FnMut(|storage, arg| {
-                let f: &mut F = Self::closure(storage);
-                let arg = Self::arg_mut(arg);
-
-                f(arg);
-            }),
+            |storage, arg| {
+                (Self::closure::<F>(storage))(Self::arg(arg));
+            },
+            ExecutorTag::FnMut,
             f,
         );
     }
@@ -277,12 +393,10 @@ impl ClosureHolder {
         F: FnOnce(&A) + 'a,
     {
         self.store_impl(
-            ClosureExecutor::FnOnce(|storage, arg| {
-                let f: F = Self::closure_once(storage);
-                let arg = Self::arg(arg);
-
-                f(arg);
-            }),
+            |storage, arg| {
+                (Self::take_closure::<F>(storage))(Self::arg(arg)); // Closure dropped here.
+            },
+            ExecutorTag::FnOnce,
             f,
         );
     }
@@ -308,62 +422,66 @@ impl ClosureHolder {
         F: FnOnce(&mut A) + 'a,
     {
         self.store_impl(
-            ClosureExecutor::FnOnceMut(|storage, arg| {
-                let f: F = Self::closure_once(storage);
-                let arg = Self::arg_mut(arg);
-
-                f(arg);
-            }),
+            |storage, arg| {
+                (Self::take_closure::<F>(storage))(Self::arg(arg)); // Closure dropped here.
+            },
+            ExecutorTag::FnOnceMut,
             f,
         );
     }
 
-    /// If the `ClosureHolder` is not empty, returns `true`; otherwise returns `false`.
+    /// If the [`ClosureHolder`] is not empty, returns `true`; otherwise returns `false`.
+    ///
+    /// [`ClosureHolder`]: struct.ClosureHolder.html
     pub fn is_none(&self) -> bool {
-        self.executor.is_none()
+        self.discriminant.executor_tag().is_none()
     }
 
-    /// If the `ClosureHolder` is not empty and was stored via [`new`] \ [`store`],
+    /// If the [`ClosureHolder`] is not empty and was stored via [`new`] \ [`store`],
     /// returns `true` (the user may call [`execute`]); otherwise returns `false`.
     ///
+    /// [`ClosureHolder`]: struct.ClosureHolder.html
     /// [`new`]: #method.new
     /// [`store`]: #method.store
     /// [`execute`]: #method.execute
     pub fn is_some(&self) -> bool {
-        self.executor.is_some()
+        self.discriminant.executor_tag().is_some()
     }
 
-    /// If the `ClosureHolder` is not empty and was stored via [`once`] \ [`store_once`],
+    /// If the [`ClosureHolder`] is not empty and was stored via [`once`] \ [`store_once`],
     /// returns `true` (the user may call [`execute_once`]); otherwise returns `false`.
     ///
+    /// [`ClosureHolder`]: struct.ClosureHolder.html
     /// [`once`]: #method.once
     /// [`store_once`]: #method.store_once
     /// [`execute_once`]: #method.execute_once
     pub fn is_once(&self) -> bool {
-        self.executor.is_once()
+        self.discriminant.executor_tag().is_once()
     }
 
-    /// If the `ClosureHolder` is not empty and was stored via [`new_mut`] \ [`store_mut`],
+    /// If the [`ClosureHolder`] is not empty and was stored via [`new_mut`] \ [`store_mut`],
     /// returns `true` (the user may call [`execute_mut`]); otherwise returns `false`.
     ///
+    /// [`ClosureHolder`]: struct.ClosureHolder.html
     /// [`new_mut`]: #method.new
     /// [`store_mut`]: #method.store
     /// [`execute_mut`]: #method.execute_mut
     pub fn is_mut(&self) -> bool {
-        self.executor.is_mut()
+        self.discriminant.executor_tag().is_mut()
     }
 
-    /// If the `ClosureHolder` is not empty and was stored via [`once_mut`] \ [`store_once_mut`],
+    /// If the [`ClosureHolder`] is not empty and was stored via [`once_mut`] \ [`store_once_mut`],
     /// returns `true` (the user may call [`execute_once_mut`]); otherwise returns `false`.
     ///
+    /// [`ClosureHolder`]: struct.ClosureHolder.html
     /// [`once_mut`]: #method.new
     /// [`store_once_mut`]: #method.store
     /// [`execute_once_mut`]: #method.execute_once_mut
     pub fn is_once_mut(&self) -> bool {
-        self.executor.is_once_mut()
+        self.discriminant.executor_tag().is_once_mut()
     }
 
-    /// If the `ClosureHolder` is not empty and was stored via [`new`] \ [`store`],
+    /// If the [`ClosureHolder`] is not empty and was stored via [`new`] \ [`store`],
     /// executes the stored closure and returns `true`; otherwise returns `false`.
     ///
     /// # Safety
@@ -371,10 +489,11 @@ impl ClosureHolder {
     /// The caller guarantees that the function is passed the same argument type
     /// as the one used in the previous call to [`new`] \ [`store`].
     ///
+    /// [`ClosureHolder`]: struct.ClosureHolder.html
     /// [`new`]: #method.new
     /// [`store`]: #method.store
     pub unsafe fn try_execute<'a, A>(&mut self, arg: &'a A) -> bool {
-        if self.executor.is_some() {
+        if self.is_some() {
             self.execute(arg);
             true
         } else {
@@ -382,16 +501,17 @@ impl ClosureHolder {
         }
     }
 
-    /// If the `ClosureHolder` is not empty and was stored via [`once`] \ [`store_once`],
+    /// If the [`ClosureHolder`] is not empty and was stored via [`once`] \ [`store_once`],
     /// executes the stored closure and returns `true`; otherwise returns `false`.
     ///
-    /// `ClosureHolder` becomes empty if the closure is executed.
+    /// [`ClosureHolder`] becomes empty if the closure is executed.
     ///
     /// # Safety
     ///
     /// The caller guarantees that the function is passed the same argument type
     /// as the one used in the previous call to [`new`] \ [`once`] \ [`store`] \ [`store_once`].
     ///
+    /// [`ClosureHolder`]: struct.ClosureHolder.html
     /// [`once`]: #method.once
     /// [`store_once`]: #method.store_once
     pub unsafe fn try_execute_once<'a, A>(&mut self, arg: &'a A) -> bool {
@@ -403,7 +523,7 @@ impl ClosureHolder {
         }
     }
 
-    /// If the `ClosureHolder` is not empty and was stored via [`new_mut`] \ [`store_mut`],
+    /// If the [`ClosureHolder`] is not empty and was stored via [`new_mut`] \ [`store_mut`],
     /// executes the stored closure and returns `true`; otherwise returns `false`.
     ///
     /// # Safety
@@ -411,10 +531,11 @@ impl ClosureHolder {
     /// The caller guarantees that the function is passed the same argument type
     /// as the one used in the previous call to [`new_mut`] \ [`store_mut`].
     ///
+    /// [`ClosureHolder`]: struct.ClosureHolder.html
     /// [`new_mut`]: #method.new_mut
     /// [`store_mut`]: #method.store_mut
     pub unsafe fn try_execute_mut<'a, A>(&mut self, arg: &'a mut A) -> bool {
-        if self.executor.is_mut() {
+        if self.is_mut() {
             self.execute_mut(arg);
             true
         } else {
@@ -422,16 +543,17 @@ impl ClosureHolder {
         }
     }
 
-    /// If the `ClosureHolder` is not empty and was stored via [`once_mut`] \ [`store_once_mut`],
+    /// If the [`ClosureHolder`] is not empty and was stored via [`once_mut`] \ [`store_once_mut`],
     /// executes the stored closure and returns `true`; otherwise returns `false`.
     ///
-    /// `ClosureHolder` becomes empty if the closure is executed.
+    /// [`ClosureHolder`] becomes empty if the closure is executed.
     ///
     /// # Safety
     ///
     /// The caller guarantees that the function is passed the same argument type
     /// as the one used in the previous call to [`once_mut`] \ [`store_once_mut`].
     ///
+    /// [`ClosureHolder`]: struct.ClosureHolder.html
     /// [`once_mut`]: #method.once_mut
     /// [`store_once_mut`]: #method.store_once_mut
     pub unsafe fn try_execute_once_mut<'a, A>(&mut self, arg: &'a mut A) -> bool {
@@ -454,41 +576,31 @@ impl ClosureHolder {
     ///
     /// # Panics
     ///
-    /// Panics if the `ClosureHolder` is empty.
+    /// Panics if the [`ClosureHolder`] is empty.
     /// Panics if the closure was not stored via [`new`] \ [`store`].
     ///
+    /// [`ClosureHolder`]: struct.ClosureHolder.html
     /// [`new`]: #method.new
     /// [`store`]: #method.store
     pub unsafe fn execute<'a, A>(&mut self, arg: &'a A) {
-        let executor = match self.executor {
-            ClosureExecutor::None => panic!("Tried to execute an empty closure."),
-            ClosureExecutor::FnOnce(_) => {
+        match self.discriminant.executor_tag() {
+            ExecutorTag::None => panic!("Tried to execute an empty closure."),
+            ExecutorTag::FnOnce => {
                 panic!("Tried to execute an `FnOnce` immutable arg closure via `execute`.")
             }
-            ClosureExecutor::FnMut(_) => {
+            ExecutorTag::FnMut => {
                 panic!("Tried to execute an `FnMut` mutable arg closure via `execute`.")
             }
-            ClosureExecutor::FnOnceMut(_) => {
+            ExecutorTag::FnOnceMut => {
                 panic!("Tried to execute an `FnOnce` mutable arg closure via `execute`.")
             }
-            ClosureExecutor::Fn(executor) => executor,
+            ExecutorTag::Fn => {},
         };
 
-        let arg = arg as *const _ as *const ();
-
-        match &mut self.storage {
-            ClosureStorage::Static(storage) => {
-                executor(&mut *storage.as_mut_ptr(), arg);
-            }
-            ClosureStorage::Dynamic(storage) => {
-                executor(
-                    &mut *storage
-                        .as_mut()
-                        .expect("Tried to execute an empty closure."),
-                    arg,
-                );
-            }
-        }
+        (self.executor)(
+            self.storage(),
+            arg as *const _ as *mut _,
+        );
     }
 
     /// Executes the stored closure unconditionally.
@@ -504,43 +616,36 @@ impl ClosureHolder {
     ///
     /// # Panics
     ///
-    /// Panics if the `ClosureHolder` is empty.
+    /// Panics if the [`ClosureHolder`] is empty.
     /// Panics if the closure was not stored via [`once`] \ [`store_once`].
     ///
+    /// [`ClosureHolder`]: struct.ClosureHolder.html
     /// [`once`]: #method.once
     /// [`store_once`]: #method.store_once
     pub unsafe fn execute_once<'a, A>(&mut self, arg: &'a A) {
-        let executor = match self.executor {
-            ClosureExecutor::None => panic!("Tried to execute an empty closure."),
-            ClosureExecutor::Fn(_) => {
+        match self.discriminant.executor_tag() {
+            ExecutorTag::None => panic!("Tried to execute an empty closure."),
+            ExecutorTag::Fn => {
                 panic!("Tried to execute an `FnMut` immutable arg closure via `execute_once`.")
             }
-            ClosureExecutor::FnMut(_) => {
+            ExecutorTag::FnMut => {
                 panic!("Tried to execute an `FnMut` mutable arg closure via `execute_once`.")
             }
-            ClosureExecutor::FnOnceMut(_) => {
+            ExecutorTag::FnOnceMut => {
                 panic!("Tried to execute an `FnOnce` mutable arg closure via `execute_once`.")
             }
-            ClosureExecutor::FnOnce(executor) => {
-                let executor = executor;
-                self.executor = ClosureExecutor::None;
-                executor
-            }
+            ExecutorTag::FnOnce => {},
         };
 
-        let arg = arg as *const _ as *const ();
+        (self.executor)(
+            self.storage(),
+            arg as *const _ as *mut _,
+        );
 
-        match &mut self.storage {
-            ClosureStorage::Static(storage) => {
-                executor(&mut *storage.as_mut_ptr(), arg);
-            }
-            ClosureStorage::Dynamic(storage) => {
-                executor(
-                    &mut *storage.take().expect("Tried to execute an empty closure."),
-                    arg,
-                );
-            }
-        }
+        // Do not run the drop handler in `clear`.
+        self.discriminant.set_executor_tag( ExecutorTag::None);
+
+        self.clear();
     }
 
     /// Executes the stored closure unconditionally.
@@ -554,41 +659,33 @@ impl ClosureHolder {
     ///
     /// # Panics
     ///
-    /// Panics if the `ClosureHolder` is empty.
+    /// Panics if the [`ClosureHolder`] is empty.
     /// Panics if the closure was not stored via [`new_mut`] \ [`store_mut`].
     ///
+    /// [`ClosureHolder`]: struct.ClosureHolder.html
+
+
     /// [`new_mut`]: #method.new_mut
     /// [`store_mut`]: #method.store_mut
     pub unsafe fn execute_mut<'a, A>(&mut self, arg: &'a mut A) {
-        let executor = match self.executor {
-            ClosureExecutor::None => panic!("Tried to execute an empty closure."),
-            ClosureExecutor::Fn(_) => {
+        match self.discriminant.executor_tag() {
+            ExecutorTag::None => panic!("Tried to execute an empty closure."),
+            ExecutorTag::Fn => {
                 panic!("Tried to execute an `FnMut` immutable arg closure via `execute_mut`.")
             }
-            ClosureExecutor::FnOnce(_) => {
+            ExecutorTag::FnOnce => {
                 panic!("Tried to execute an `FnOnce` immutable arg closure via `execute_mut`.")
             }
-            ClosureExecutor::FnOnceMut(_) => {
+            ExecutorTag::FnOnceMut => {
                 panic!("Tried to execute an `FnOnce` mutable arg closure via `execute_mut`.")
             }
-            ClosureExecutor::FnMut(executor) => executor,
+            ExecutorTag::FnMut => {},
         };
 
-        let arg = arg as *mut _ as *mut ();
-
-        match &mut self.storage {
-            ClosureStorage::Static(storage) => {
-                executor(&mut *storage.as_mut_ptr(), arg);
-            }
-            ClosureStorage::Dynamic(storage) => {
-                executor(
-                    &mut *storage
-                        .as_mut()
-                        .expect("Tried to execute an empty closure."),
-                    arg,
-                );
-            }
-        }
+        (self.executor)(
+            self.storage(),
+            arg as *mut _ as *mut _,
+        );
     }
 
     /// Executes the stored closure unconditionally.
@@ -604,96 +701,134 @@ impl ClosureHolder {
     ///
     /// # Panics
     ///
-    /// Panics if the `ClosureHolder` is empty.
+    /// Panics if the [`ClosureHolder`] is empty.
     /// Panics if the closure was not stored via [`once_mut`] \ [`store_once_mut`].
     ///
+    /// [`ClosureHolder`]: struct.ClosureHolder.html
     /// [`once_mut`]: #method.once_mut
     /// [`store_once_mut`]: #method.store_once_mut
     pub unsafe fn execute_once_mut<'a, A>(&mut self, arg: &'a mut A) {
-        let executor = match self.executor {
-            ClosureExecutor::None => panic!("Tried to execute an empty closure."),
-            ClosureExecutor::Fn(_) => {
+        match self.discriminant.executor_tag() {
+            ExecutorTag::None => panic!("Tried to execute an empty closure."),
+            ExecutorTag::Fn => {
                 panic!("Tried to execute an `FnMut` immutable arg closure via `execute_once_mut`.")
             }
-            ClosureExecutor::FnMut(_) => {
+            ExecutorTag::FnMut => {
                 panic!("Tried to execute an `FnMut` mutable arg closure via `execute_once_mut`.")
             }
-            ClosureExecutor::FnOnce(_) => {
+            ExecutorTag::FnOnce => {
                 panic!("Tried to execute an `FnOnce` immutable arg closure via `execute_once_mut`.")
             }
-            ClosureExecutor::FnOnceMut(executor) => {
-                let executor = executor;
-                self.executor = ClosureExecutor::None;
-                executor
-            }
+            ExecutorTag::FnOnceMut => {},
         };
 
-        let arg = arg as *mut _ as *mut ();
+        (self.executor)(
+            self.storage(),
+            arg as *mut _ as *mut _,
+        );
 
-        match &mut self.storage {
-            ClosureStorage::Static(storage) => {
-                executor(&mut *storage.as_mut_ptr(), arg);
-            }
-            ClosureStorage::Dynamic(storage) => {
-                executor(
-                    &mut *storage.take().expect("Tried to execute an empty closure."),
-                    arg,
-                );
-            }
-        }
+        // Do not run the drop handler in `clear`.
+        self.discriminant.set_executor_tag( ExecutorTag::None);
+
+        self.clear();
     }
 
-    unsafe fn store_closure<'a, F: Sized>(f: F) -> ClosureStorage {
+    pub unsafe fn clear(&mut self) {
+        // `FnMut` closures need a drop handler.
+        // `FnOnce` closures are dropped when executed.
+        match self.discriminant.executor_tag() {
+            ExecutorTag::Fn | ExecutorTag::FnMut => {
+                (self.drop_handler)(Self::storage(self));
+            },
+            ExecutorTag::FnOnce | ExecutorTag::FnOnceMut => {},
+            ExecutorTag::None => {},
+        }
+
+        if self.discriminant.storage_tag() == StorageTag::Dynamic {
+            let storage = Box::from_raw(self.storage._dynamic.0);
+            mem::drop(storage);
+        }
+
+        self.executor = |_,_| {};
+        self.drop_handler = |_|{};
+
+        self.storage = Default::default();
+
+        self.discriminant = Discriminant::new(StorageTag::Static, ExecutorTag::None);
+    }
+
+    unsafe fn store_closure<'a, F: Sized>(storage: &mut StorageUnion, f: F) -> StorageTag {
         let size = mem::size_of::<F>();
 
-        if size > CLOSURE_STORAGE_SIZE {
-            let storage = vec![0u8; size].into_boxed_slice();
-            let ptr = &*storage as *const _ as *mut F;
+        if size > STORAGE_SIZE {
+            let ptr = Box::into_raw(vec![0u8; size].into_boxed_slice());
 
-            ptr::write(ptr, f);
+            ptr::write::<F>((*ptr).as_mut_ptr() as *mut _, f);
 
-            ClosureStorage::Dynamic(Some(storage))
+            storage._dynamic = DynamicStorage(ptr);
+
+            StorageTag::Dynamic
         } else {
-            let mut storage = MaybeUninit::<StaticClosureStorage>::zeroed();
-            let ptr = storage.as_mut_ptr() as *mut F;
+            ptr::write::<F>(storage._static.0.as_mut_ptr() as *mut _, f);
 
-            ptr::write(ptr, f);
-
-            ClosureStorage::Static(storage)
+            StorageTag::Static
         }
     }
 
-    unsafe fn store_impl<F: Sized>(&mut self, e: ClosureExecutor, f: F) {
+    unsafe fn store_impl<F: Sized>(&mut self, executor: Executor, executor_tag: ExecutorTag, f: F) {
         assert!(
             self.is_none(),
             "Tried to store a closure in an occupied `ClosureHolder`."
         );
 
-        self.executor = e;
-        self.storage = ClosureHolder::store_closure(f);
+        self.executor = executor;
+
+        // `FnMut` closures need a drop handler.
+        // `FnOnce` closures are dropped when executed.
+        match executor_tag {
+            ExecutorTag::Fn | ExecutorTag::FnMut => {
+                self.drop_handler = |storage| {
+                    let f = Self::take_closure::<F>(storage);
+                    mem::drop(f);
+                };
+            },
+            ExecutorTag::FnOnce | ExecutorTag::FnOnceMut => {},
+            ExecutorTag::None => unreachable!(),
+        }
+
+        let storage_tag = Self::store_closure(&mut self.storage, f);
+
+        self.discriminant = Discriminant::new(storage_tag, executor_tag);
     }
 
-    unsafe fn arg<'a, A>(arg: *const ()) -> &'a A {
-        &*(arg as *const _)
-    }
-
-    unsafe fn arg_mut<'a, A>(arg: *mut ()) -> &'a mut A {
-        &mut *(arg as *mut _)
-    }
-
-    unsafe fn closure<'a, F>(storage: &mut [u8]) -> &'a mut F {
+    unsafe fn closure<F>(storage: &mut [u8]) -> &mut F {
         &mut *(storage.as_mut_ptr() as *mut _)
     }
 
-    unsafe fn closure_once<F>(storage: &mut [u8]) -> F {
+    unsafe fn take_closure<F>(storage: &mut [u8]) -> F {
         ptr::read::<F>(storage.as_mut_ptr() as *mut _)
+    }
+
+    unsafe fn arg<'a, A>(arg: *mut ()) -> &'a mut A {
+        &mut *(arg as *mut _)
+    }
+
+    unsafe fn storage(&mut self) -> &mut [u8] {
+        match self.discriminant.storage_tag() {
+            StorageTag::Static => {
+                self.storage._static.0.as_mut()
+            },
+            StorageTag::Dynamic => {
+                &mut *self.storage._dynamic.0
+            }
+        }
     }
 
     #[cfg(test)]
     fn is_static(&self) -> bool {
         assert!(!self.is_none());
 
-        if let ClosureStorage::Static(_) = &self.storage {
+        if self.discriminant.storage_tag() == StorageTag::Static {
             true
         } else {
             false
@@ -704,12 +839,39 @@ impl ClosureHolder {
     fn is_dynamic(&self) -> bool {
         assert!(!self.is_none());
 
-        if let ClosureStorage::Dynamic(_) = &self.storage {
+        if self.discriminant.storage_tag() == StorageTag::Dynamic {
             true
         } else {
             false
         }
     }
+}
+
+impl Default for ClosureHolder {
+    fn default() -> Self {
+        Self::empty()
+    }
+}
+
+impl Drop for ClosureHolder {
+    fn drop(&mut self) {
+        unsafe {
+            self.clear();
+        }
+    }
+}
+
+/// Number of bits needed to represent `count` enum states.
+const fn num_bits(count: u8) -> u8 {
+    8 - (count - 1).leading_zeros() as u8
+}
+
+fn read_bits(source: u8, num_bits_to_read: u8, offset: u8) -> u8 {
+    debug_assert!((num_bits_to_read + offset) <= 8);
+
+    let read_mask = (1 << num_bits_to_read) - 1;
+
+    (source >> offset) & read_mask
 }
 
 #[cfg(test)]
@@ -1211,7 +1373,7 @@ mod tests {
 
     #[test]
     fn static_storage() {
-        let capture = [0u8; CLOSURE_STORAGE_SIZE];
+        let capture = [0u8; STORAGE_SIZE];
 
         let h = unsafe { ClosureHolder::once(move |_arg: &usize| println!("{}", capture.len())) };
 
@@ -1220,7 +1382,7 @@ mod tests {
 
     #[test]
     fn dynamic_storage() {
-        let capture = [0u8; CLOSURE_STORAGE_SIZE + 1];
+        let capture = [0u8; STORAGE_SIZE + 1];
 
         let h = unsafe { ClosureHolder::once(move |_arg: &usize| println!("{}", capture.len())) };
 
@@ -1439,5 +1601,237 @@ mod tests {
             assert!(!h.try_execute_once_mut(&mut 0usize));
             h.execute_once_mut(&mut 0usize);
         }
+    }
+
+    #[test]
+    fn destructor_static() {
+        static mut NUM_RESOURCES: u32 = 0;
+
+        struct Resource {}
+
+        impl Resource {
+            fn new() -> Self {
+                unsafe {
+                    NUM_RESOURCES += 1;
+                }
+
+                Self{}
+            }
+
+            fn foo(&self) {
+                println!("Hello from resource.");
+            }
+
+            fn num_resources() -> u32 {
+                unsafe { NUM_RESOURCES }
+            }
+        }
+
+        impl Drop for Resource {
+            fn drop(&mut self) {
+                unsafe {
+                    debug_assert!(NUM_RESOURCES > 0);
+                    NUM_RESOURCES -= 1;
+                }
+            }
+        }
+
+        assert_eq!(Resource::num_resources(), 0);
+
+        {
+            let res = Resource::new();
+            assert_eq!(Resource::num_resources(), 1);
+
+            unsafe {
+                let mut h = ClosureHolder::new(move |_arg: &usize| {
+                    res.foo();
+                });
+
+                h.execute(&0usize);
+                h.execute(&0usize);
+
+                assert_eq!(Resource::num_resources(), 1);
+
+                // Closure dropped here, drop handler called.
+            }
+
+            assert_eq!(Resource::num_resources(), 0);
+        }
+
+        assert_eq!(Resource::num_resources(), 0);
+    }
+
+    #[test]
+    fn destructor_dynamic() {
+        static mut NUM_RESOURCES: u32 = 0;
+
+        struct Resource {}
+
+        impl Resource {
+            fn new() -> Self {
+                unsafe {
+                    NUM_RESOURCES += 1;
+                }
+
+                Self{}
+            }
+
+            fn foo(&self) {
+                println!("Hello from resource.");
+            }
+
+            fn num_resources() -> u32 {
+                unsafe { NUM_RESOURCES }
+            }
+        }
+
+        impl Drop for Resource {
+            fn drop(&mut self) {
+                unsafe {
+                    debug_assert!(NUM_RESOURCES > 0);
+                    NUM_RESOURCES -= 1;
+                }
+            }
+        }
+
+        assert_eq!(Resource::num_resources(), 0);
+
+        {
+            let res = Resource::new();
+            assert_eq!(Resource::num_resources(), 1);
+
+            let capture = [0u8; HOLDER_SIZE];
+
+            unsafe {
+                let mut h = ClosureHolder::new(move |_arg: &usize| {
+                    res.foo();
+
+                    println!("{}", capture.len());
+                });
+
+                h.execute(&0usize);
+                h.execute(&0usize);
+
+                assert_eq!(Resource::num_resources(), 1);
+
+                // Closure dropped here, drop handler called, boxed storage freed.
+            }
+
+            assert_eq!(Resource::num_resources(), 0);
+        }
+
+        assert_eq!(Resource::num_resources(), 0);
+    }
+
+    #[test]
+    fn destructor_once_static() {
+        static mut NUM_RESOURCES: u32 = 0;
+
+        struct Resource {}
+
+        impl Resource {
+            fn new() -> Self {
+                unsafe {
+                    NUM_RESOURCES += 1;
+                }
+
+                Self{}
+            }
+
+            fn foo(&self) {
+                println!("Hello from resource.");
+            }
+
+            fn num_resources() -> u32 {
+                unsafe { NUM_RESOURCES }
+            }
+        }
+
+        impl Drop for Resource {
+            fn drop(&mut self) {
+                unsafe {
+                    debug_assert!(NUM_RESOURCES > 0);
+                    NUM_RESOURCES -= 1;
+                }
+            }
+        }
+
+        assert_eq!(Resource::num_resources(), 0);
+
+        {
+            let res = Resource::new();
+            assert_eq!(Resource::num_resources(), 1);
+
+            unsafe {
+                let mut h = ClosureHolder::once(move |_arg: &usize| {
+                    res.foo();
+                });
+
+                // Closure dropped here.
+                h.execute_once(&0usize);
+
+                assert_eq!(Resource::num_resources(), 0);
+            }
+        }
+
+        assert_eq!(Resource::num_resources(), 0);
+    }
+
+    #[test]
+    fn destructor_once_dynamic() {
+        static mut NUM_RESOURCES: u32 = 0;
+
+        struct Resource {}
+
+        impl Resource {
+            fn new() -> Self {
+                unsafe {
+                    NUM_RESOURCES += 1;
+                }
+
+                Self{}
+            }
+
+            fn foo(&self) {
+                println!("Hello from resource.");
+            }
+
+            fn num_resources() -> u32 {
+                unsafe { NUM_RESOURCES }
+            }
+        }
+
+        impl Drop for Resource {
+            fn drop(&mut self) {
+                unsafe {
+                    debug_assert!(NUM_RESOURCES > 0);
+                    NUM_RESOURCES -= 1;
+                }
+            }
+        }
+
+        assert_eq!(Resource::num_resources(), 0);
+
+        {
+            let res = Resource::new();
+            assert_eq!(Resource::num_resources(), 1);
+
+            let capture = [0u8; HOLDER_SIZE];
+
+            unsafe {
+                let mut h = ClosureHolder::once(move |_arg: &usize| {
+                    res.foo();
+
+                    println!("{}", capture.len());
+                });
+
+                // Closure dropped here, boxed storage freed.
+                h.execute_once(&0usize);
+
+                assert_eq!(Resource::num_resources(), 0);
+            }
+        }
+
+        assert_eq!(Resource::num_resources(), 0);
     }
 }
