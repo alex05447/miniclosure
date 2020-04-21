@@ -316,7 +316,7 @@ impl ClosureHolder {
         result
     }
 
-    /// Stores the closure `f` in the holder for later execution with [`execute`].
+    /// Stores the closure `f` in the [`holder`] for later execution with [`execute`].
     ///
     /// Closure takes a single immutable reference argument.
     /// Stored closure may be executed multiple times.
@@ -329,8 +329,9 @@ impl ClosureHolder {
     ///
     /// # Panics
     ///
-    /// Panics if the holder already contains a closure.
+    /// Panics if the [`holder`] already contains a closure.
     ///
+    /// [`holder`]: struct.ClosureHolder.html
     /// [`execute`]: #method.execute
     pub unsafe fn store<'a, F, A>(&mut self, f: F)
     where
@@ -345,7 +346,7 @@ impl ClosureHolder {
         );
     }
 
-    /// Stores the closure `f` in the holder for later execution with [`execute_mut`].
+    /// Stores the closure `f` in the [`holder`] for later execution with [`execute_mut`].
     ///
     /// Closure takes a single mutable reference argument.
     /// Stored closure may be executed multiple times.
@@ -358,8 +359,9 @@ impl ClosureHolder {
     ///
     /// # Panics
     ///
-    /// Panics if the holder already contains a closure.
+    /// Panics if the [`holder`] already contains a closure.
     ///
+    /// [`holder`]: struct.ClosureHolder.html
     /// [`execute_mut`]: #method.execute_mut
     pub unsafe fn store_mut<'a, F, A>(&mut self, f: F)
     where
@@ -374,7 +376,7 @@ impl ClosureHolder {
         );
     }
 
-    /// Stores the closure `f` in the holder for later execution with [`execute_once`].
+    /// Stores the closure `f` in the [`holder`] for later execution with [`execute_once`].
     ///
     /// Closure takes a single immutable reference argument.
     /// Stored closure may only be executed once.
@@ -387,8 +389,9 @@ impl ClosureHolder {
     ///
     /// # Panics
     ///
-    /// Panics if the holder already contains a closure.
+    /// Panics if the [`holder`] already contains a closure.
     ///
+    /// [`holder`]: struct.ClosureHolder.html
     /// [`execute_once`]: #method.execute_once
     pub unsafe fn store_once<'a, F, A>(&mut self, f: F)
     where
@@ -403,7 +406,7 @@ impl ClosureHolder {
         );
     }
 
-    /// Stores the closure `f` in the holder for later execution with [`execute_once_mut`].
+    /// Stores the closure `f` in the [`holder`] for later execution with [`execute_once_mut`].
     ///
     /// Closure takes a single mutable reference argument.
     /// Stored closure may only be executed once.
@@ -416,8 +419,9 @@ impl ClosureHolder {
     ///
     /// # Panics
     ///
-    /// Panics if the holder already contains a closure.
+    /// Panics if the [`holder`] already contains a closure.
     ///
+    /// [`holder`]: struct.ClosureHolder.html
     /// [`execute_once_mut`]: #method.execute_once_mut
     pub unsafe fn store_once_mut<'a, F, A>(&mut self, f: F)
     where
@@ -432,17 +436,17 @@ impl ClosureHolder {
         );
     }
 
-    /// If the [`ClosureHolder`] is not empty, returns `true`; otherwise returns `false`.
+    /// If the [`holder`] is not empty, returns `true`; otherwise returns `false`.
     ///
-    /// [`ClosureHolder`]: struct.ClosureHolder.html
+    /// [`holder`]: struct.ClosureHolder.html
     pub fn is_none(&self) -> bool {
         self.discriminant.executor_tag().is_none()
     }
 
-    /// If the [`ClosureHolder`] is not empty and was stored via [`new`] \ [`store`],
+    /// If the [`holder`] is not empty and was stored via [`new`] \ [`store`],
     /// returns `true` (the user may call [`execute`]); otherwise returns `false`.
     ///
-    /// [`ClosureHolder`]: struct.ClosureHolder.html
+    /// [`holder`]: struct.ClosureHolder.html
     /// [`new`]: #method.new
     /// [`store`]: #method.store
     /// [`execute`]: #method.execute
@@ -450,10 +454,10 @@ impl ClosureHolder {
         self.discriminant.executor_tag().is_some()
     }
 
-    /// If the [`ClosureHolder`] is not empty and was stored via [`once`] \ [`store_once`],
+    /// If the [`holder`] is not empty and was stored via [`once`] \ [`store_once`],
     /// returns `true` (the user may call [`execute_once`]); otherwise returns `false`.
     ///
-    /// [`ClosureHolder`]: struct.ClosureHolder.html
+    /// [`holder`]: struct.ClosureHolder.html
     /// [`once`]: #method.once
     /// [`store_once`]: #method.store_once
     /// [`execute_once`]: #method.execute_once
@@ -461,10 +465,10 @@ impl ClosureHolder {
         self.discriminant.executor_tag().is_once()
     }
 
-    /// If the [`ClosureHolder`] is not empty and was stored via [`new_mut`] \ [`store_mut`],
+    /// If the [`holder`] is not empty and was stored via [`new_mut`] \ [`store_mut`],
     /// returns `true` (the user may call [`execute_mut`]); otherwise returns `false`.
     ///
-    /// [`ClosureHolder`]: struct.ClosureHolder.html
+    /// [`holder`]: struct.ClosureHolder.html
     /// [`new_mut`]: #method.new
     /// [`store_mut`]: #method.store
     /// [`execute_mut`]: #method.execute_mut
@@ -472,10 +476,10 @@ impl ClosureHolder {
         self.discriminant.executor_tag().is_mut()
     }
 
-    /// If the [`ClosureHolder`] is not empty and was stored via [`once_mut`] \ [`store_once_mut`],
+    /// If the [`holder`] is not empty and was stored via [`once_mut`] \ [`store_once_mut`],
     /// returns `true` (the user may call [`execute_once_mut`]); otherwise returns `false`.
     ///
-    /// [`ClosureHolder`]: struct.ClosureHolder.html
+    /// [`holder`]: struct.ClosureHolder.html
     /// [`once_mut`]: #method.new
     /// [`store_once_mut`]: #method.store
     /// [`execute_once_mut`]: #method.execute_once_mut
@@ -483,7 +487,7 @@ impl ClosureHolder {
         self.discriminant.executor_tag().is_once_mut()
     }
 
-    /// If the [`ClosureHolder`] is not empty and was stored via [`new`] \ [`store`],
+    /// If the [`holder`] is not empty and was stored via [`new`] \ [`store`],
     /// executes the stored closure and returns `true`; otherwise returns `false`.
     ///
     /// # Safety
@@ -491,7 +495,7 @@ impl ClosureHolder {
     /// The caller guarantees that the function is passed the same argument type
     /// as the one used in the previous call to [`new`] \ [`store`].
     ///
-    /// [`ClosureHolder`]: struct.ClosureHolder.html
+    /// [`holder`]: struct.ClosureHolder.html
     /// [`new`]: #method.new
     /// [`store`]: #method.store
     pub unsafe fn try_execute<'a, A>(&mut self, arg: &'a A) -> bool {
@@ -503,19 +507,20 @@ impl ClosureHolder {
         }
     }
 
-    /// If the [`ClosureHolder`] is not empty and was stored via [`once`] \ [`store_once`],
+    /// If the [`holder`] is not empty and was stored via [`once`] \ [`store_once`],
     /// executes the stored closure and returns `true`; otherwise returns `false`.
     ///
-    /// [`ClosureHolder`] becomes empty if the closure is executed.
+    /// The [`holder`] becomes empty / [`cleared`] if the closure is executed.
     ///
     /// # Safety
     ///
     /// The caller guarantees that the function is passed the same argument type
     /// as the one used in the previous call to [`new`] \ [`once`] \ [`store`] \ [`store_once`].
     ///
-    /// [`ClosureHolder`]: struct.ClosureHolder.html
+    /// [`holder`]: struct.ClosureHolder.html
     /// [`once`]: #method.once
     /// [`store_once`]: #method.store_once
+    /// [`cleared`]: #method.clear
     pub unsafe fn try_execute_once<'a, A>(&mut self, arg: &'a A) -> bool {
         if self.is_once() {
             self.execute_once(arg);
@@ -525,7 +530,7 @@ impl ClosureHolder {
         }
     }
 
-    /// If the [`ClosureHolder`] is not empty and was stored via [`new_mut`] \ [`store_mut`],
+    /// If the [`holder`] is not empty and was stored via [`new_mut`] \ [`store_mut`],
     /// executes the stored closure and returns `true`; otherwise returns `false`.
     ///
     /// # Safety
@@ -533,7 +538,7 @@ impl ClosureHolder {
     /// The caller guarantees that the function is passed the same argument type
     /// as the one used in the previous call to [`new_mut`] \ [`store_mut`].
     ///
-    /// [`ClosureHolder`]: struct.ClosureHolder.html
+    /// [`holder`]: struct.ClosureHolder.html
     /// [`new_mut`]: #method.new_mut
     /// [`store_mut`]: #method.store_mut
     pub unsafe fn try_execute_mut<'a, A>(&mut self, arg: &'a mut A) -> bool {
@@ -545,19 +550,20 @@ impl ClosureHolder {
         }
     }
 
-    /// If the [`ClosureHolder`] is not empty and was stored via [`once_mut`] \ [`store_once_mut`],
+    /// If the [`holder`] is not empty and was stored via [`once_mut`] \ [`store_once_mut`],
     /// executes the stored closure and returns `true`; otherwise returns `false`.
     ///
-    /// [`ClosureHolder`] becomes empty if the closure is executed.
+    /// The [`holder`] becomes empty / [`cleared`] if the closure is executed.
     ///
     /// # Safety
     ///
     /// The caller guarantees that the function is passed the same argument type
     /// as the one used in the previous call to [`once_mut`] \ [`store_once_mut`].
     ///
-    /// [`ClosureHolder`]: struct.ClosureHolder.html
+    /// [`holder`]: struct.ClosureHolder.html
     /// [`once_mut`]: #method.once_mut
     /// [`store_once_mut`]: #method.store_once_mut
+    /// [`cleared`]: #method.clear
     pub unsafe fn try_execute_once_mut<'a, A>(&mut self, arg: &'a mut A) -> bool {
         if self.is_once_mut() {
             self.execute_once_mut(arg);
@@ -578,10 +584,10 @@ impl ClosureHolder {
     ///
     /// # Panics
     ///
-    /// Panics if the [`ClosureHolder`] is empty.
+    /// Panics if the [`holder`] is empty.
     /// Panics if the closure was not stored via [`new`] \ [`store`].
     ///
-    /// [`ClosureHolder`]: struct.ClosureHolder.html
+    /// [`holder`]: struct.ClosureHolder.html
     /// [`new`]: #method.new
     /// [`store`]: #method.store
     pub unsafe fn execute<'a, A>(&mut self, arg: &'a A) {
@@ -606,7 +612,7 @@ impl ClosureHolder {
     ///
     /// May only be called for closures stored via [`once`] \ [`store_once`].
     ///
-    /// The [`ClosureHolder`] becomes empty / [`cleared`] after this call.
+    /// The [`holder`] becomes empty / [`cleared`] after this call.
     ///
     /// # Safety
     ///
@@ -615,10 +621,10 @@ impl ClosureHolder {
     ///
     /// # Panics
     ///
-    /// Panics if the [`ClosureHolder`] is empty.
+    /// Panics if the [`holder`] is empty.
     /// Panics if the closure was not stored via [`once`] \ [`store_once`].
     ///
-    /// [`ClosureHolder`]: struct.ClosureHolder.html
+    /// [`holder`]: struct.ClosureHolder.html
     /// [`once`]: #method.once
     /// [`store_once`]: #method.store_once
     /// [`cleared`]: #method.clear
@@ -656,10 +662,10 @@ impl ClosureHolder {
     ///
     /// # Panics
     ///
-    /// Panics if the [`ClosureHolder`] is empty.
+    /// Panics if the [`holder`] is empty.
     /// Panics if the closure was not stored via [`new_mut`] \ [`store_mut`].
     ///
-    /// [`ClosureHolder`]: struct.ClosureHolder.html
+    /// [`holder`]: struct.ClosureHolder.html
     /// [`new_mut`]: #method.new_mut
     /// [`store_mut`]: #method.store_mut
     pub unsafe fn execute_mut<'a, A>(&mut self, arg: &'a mut A) {
@@ -684,7 +690,7 @@ impl ClosureHolder {
     ///
     /// May only be called for closures stored via [`once_mut`] \ [`store_once_mut`].
     ///
-    /// The [`ClosureHolder`] becomes empty / [`cleared`] after this call.
+    /// The [`holder`] becomes empty / [`cleared`] after this call.
     ///
     /// # Safety
     ///
@@ -693,10 +699,10 @@ impl ClosureHolder {
     ///
     /// # Panics
     ///
-    /// Panics if the [`ClosureHolder`] is empty.
+    /// Panics if the [`holder`] is empty.
     /// Panics if the closure was not stored via [`once_mut`] \ [`store_once_mut`].
     ///
-    /// [`ClosureHolder`]: struct.ClosureHolder.html
+    /// [`holder`]: struct.ClosureHolder.html
     /// [`once_mut`]: #method.once_mut
     /// [`store_once_mut`]: #method.store_once_mut
     /// [`cleared`]: #method.clear
@@ -723,17 +729,17 @@ impl ClosureHolder {
         self.clear();
     }
 
-    /// Clears the [`ClosureHolder`].
+    /// Clears the [`holder`].
     ///
     /// Drops the closure captures; frees the allocated storage buffer, if necessary.
     ///
-    /// [`ClosureHolder`]: struct.ClosureHolder.html
+    /// [`holder`]: struct.ClosureHolder.html
     pub unsafe fn clear(&mut self) {
         // `FnMut` closures need a drop handler.
         // `FnOnce` closures are dropped when executed.
         match self.discriminant.executor_tag() {
             ExecutorTag::Fn | ExecutorTag::FnMut => {
-                (self.drop_handler)(Self::storage(self));
+                (self.drop_handler)(self.storage());
             }
             ExecutorTag::FnOnce | ExecutorTag::FnOnceMut => {}
             ExecutorTag::None => {}
