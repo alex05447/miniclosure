@@ -26,36 +26,62 @@ type Executor = fn(&mut [u8], *mut ());
 /// [`ClosureHolder`]: #struct.ClosureHolder.html
 type DropHandler = fn(&mut [u8]);
 
+/// Vtable struct for a concrete closure type
+/// which knows
+/// 1) how to unpack/execute the closure;
+/// 2) how to drop it;
+/// 3) whether the closure storage is dynamic (boxed);
+/// 4) the closure's mutability / argument mutability.
+/// A static pointer to this is stored in the closure holder
+struct ClosureVTable {
+    execute: Executor,
+    drop: DropHandler,
+    storage_tag: fn() -> StorageTag,
+    executor_tag: fn() -> ExecutorTag,
+}
+
+fn default_vtable() -> &'static ClosureVTable {
+    &ClosureVTable {
+        execute: |_, _| {},
+        drop: |_| {},
+        storage_tag: || StorageTag::Static,
+        executor_tag: || ExecutorTag::None,
+    }
+}
+
+fn vtable_storage_tag<F>() -> StorageTag {
+    if size_of::<F>() > STORAGE_SIZE {
+        StorageTag::Dynamic
+    } else {
+        StorageTag::Static
+    }
+}
+
 /// Total amount of memory used by the [`ClosureHolder`]
 ///
 /// [`ClosureHolder`]: #struct.ClosureHolder.html
 const HOLDER_SIZE: usize = 64;
 
-const EXECUTOR_SIZE: usize = size_of::<Executor>();
-const DROP_HANDLER_SIZE: usize = size_of::<DropHandler>();
-const DISCRIMINANT_SIZE: usize = size_of::<u8>();
+const VTABLE_SIZE: usize = size_of::<&'static ClosureVTable>();
 
 /// Amount of memory left for closure capture storage left in the [`ClosureHolder`].
 ///
-/// x86: 4b (executor func ptr) + 4b (drop handler func ptr) + 1b (discriminant) + 55b (closure storage) = 64b
-/// x64: 8b (executor func ptr) + 8b (drop handler func ptr) + 1b (discriminant) + 47b (closure storage) = 64b
+/// x86: 4b (vtable ptr) + 60b (closure storage) = 64b
+/// x64: 8b (vtable ptr) + 56b (closure storage) = 64b
 ///
 /// [`ClosureHolder`]: #struct.ClosureHolder.html
-const STORAGE_SIZE: usize =
-    HOLDER_SIZE /* 64b */
-    - EXECUTOR_SIZE /* 4b / 8b -> 60b / 56b */
-    - DISCRIMINANT_SIZE /* 1b -> 59b / 55b */
-    - DROP_HANDLER_SIZE /* 4b / 8b -> 55b / 47b */;
+const STORAGE_SIZE: usize = HOLDER_SIZE /* 64b */
+    - VTABLE_SIZE; /* 4b / 8b -> 60b / 56b */
 
 /// Raw byte buffer used to store the closure capture, if it fits in `STORAGE_SIZE` bytes.
-#[repr(C, packed(1))]
+#[repr(C)]
 #[derive(Clone, Copy)] // `Copy` needed for union storage.
 struct StaticStorage([u8; STORAGE_SIZE]);
 
 const_assert_eq!(size_of::<StaticStorage>(), STORAGE_SIZE);
 
 /// Heap-allocated buffer used to store the closure capture, if it does not fit in `STORAGE_SIZE` bytes.
-#[repr(C, packed(1))]
+#[repr(C)]
 #[derive(Clone, Copy)] // `Copy` needed for union storage.
 struct DynamicStorage(*mut [u8]);
 
@@ -64,7 +90,7 @@ const_assert_eq!(size_of::<DynamicStorage>(), size_of::<usize>() * 2); // Fat po
 /// Closure capture storage.
 /// Static or dynamic.
 /// Tag/discriminant is encoded separately.
-#[repr(C, packed(1))]
+#[repr(C)]
 union StorageUnion {
     _static: StaticStorage,
     _dynamic: DynamicStorage,
@@ -140,48 +166,6 @@ impl ExecutorTag {
     }
 }
 
-const STORAGE_TAG_OFFSET: u8 = 0;
-const STORAGE_TAG_BITS: u8 = num_bits(STORAGETAG_COUNT as u8);
-const_assert_eq!(STORAGE_TAG_BITS, 1);
-const STORAGE_TAG_MASK: u8 = (1 << STORAGE_TAG_BITS) - 1;
-
-const EXECUTOR_TAG_OFFSET: u8 = STORAGE_TAG_OFFSET + STORAGE_TAG_BITS;
-const EXECUTOR_TAG_BITS: u8 = num_bits(EXECUTORTAG_COUNT as u8);
-const_assert_eq!(EXECUTOR_TAG_BITS, 3);
-const EXECUTOR_TAG_MASK: u8 = (1 << EXECUTOR_TAG_BITS) - 1;
-
-/// Closure holder discriminant.
-/// Encodes storage union tag and executor union tag.
-///
-/// . . . . e e e s
-#[repr(transparent)]
-#[derive(Clone, Copy)]
-struct Discriminant(u8);
-
-impl Discriminant {
-    fn new(storage: StorageTag, executor: ExecutorTag) -> Self {
-        use num_traits::ToPrimitive;
-        Self(
-            (storage.to_u8().unwrap() & STORAGE_TAG_MASK) << STORAGE_TAG_OFFSET
-                | (executor.to_u8().unwrap() & EXECUTOR_TAG_MASK) << EXECUTOR_TAG_OFFSET,
-        )
-    }
-
-    fn storage_tag(self) -> StorageTag {
-        use num_traits::FromPrimitive;
-        StorageTag::from_u8(read_bits(self.0, STORAGE_TAG_BITS, STORAGE_TAG_OFFSET)).unwrap()
-    }
-
-    fn executor_tag(self) -> ExecutorTag {
-        use num_traits::FromPrimitive;
-        ExecutorTag::from_u8(read_bits(self.0, EXECUTOR_TAG_BITS, EXECUTOR_TAG_OFFSET)).unwrap()
-    }
-
-    fn set_executor_tag(&mut self, executor: ExecutorTag) {
-        *self = Discriminant::new(self.storage_tag(), executor);
-    }
-}
-
 /// (Unsafe) wrapper for a closure/function pointer with a single type- and lifetime-erased reference argument.
 ///
 /// Internally uses the small function optimization, providing 47b / 55b of closure storage space on x64 / x86.
@@ -209,12 +193,10 @@ impl Discriminant {
 /// [`execute_mut`]: #method.execute_mut
 /// [`execute_once`]: #method.execute_once
 /// [`execute_once_mut`]: #method.execute_once_mut
-#[repr(C, packed(1))]
+#[repr(C)]
 pub struct ClosureHolder {
-    executor: Executor,         // offs 0b          size 4b / 8b
-    drop_handler: DropHandler,  // offs 4b / 8b     size 4b / 8b
-    storage: StorageUnion,      // offs 8b / 16b    size 55b / 47b
-    discriminant: Discriminant, // offs 63b         size 1b
+    vtable: &'static ClosureVTable, // offs 0b          size 4b / 8b
+    storage: StorageUnion,          // offs 4b / 8b     size 60b / 56b
 }
 
 const_assert_eq!(size_of::<ClosureHolder>(), HOLDER_SIZE);
@@ -225,10 +207,8 @@ impl ClosureHolder {
     /// [`ClosureHolder`]: #struct.ClosureHolder.html
     pub fn empty() -> Self {
         ClosureHolder {
-            executor: |_, _| {},
-            drop_handler: |_| {},
+            vtable: default_vtable(),
             storage: Default::default(),
-            discriminant: Discriminant::new(StorageTag::Static, ExecutorTag::None),
         }
     }
 
@@ -337,13 +317,18 @@ impl ClosureHolder {
     where
         F: FnMut(&A) + 'a,
     {
-        self.store_impl(
-            |storage, arg| {
+        let vtable = &ClosureVTable {
+            execute: |storage, arg| {
                 (Self::closure::<F>(storage))(Self::arg(arg));
             },
-            ExecutorTag::Fn,
-            f,
-        );
+            drop: |storage| {
+                Self::take_closure::<F>(storage); // Closure dropped here.
+            },
+            storage_tag: vtable_storage_tag::<F>,
+            executor_tag: || ExecutorTag::Fn,
+        };
+
+        self.store_impl(vtable, f);
     }
 
     /// Stores the closure `f` in the [`holder`] for later execution with [`execute_mut`].
@@ -367,13 +352,18 @@ impl ClosureHolder {
     where
         F: FnMut(&mut A) + 'a,
     {
-        self.store_impl(
-            |storage, arg| {
+        let vtable = &ClosureVTable {
+            execute: |storage, arg| {
                 (Self::closure::<F>(storage))(Self::arg(arg));
             },
-            ExecutorTag::FnMut,
-            f,
-        );
+            drop: |storage| {
+                Self::take_closure::<F>(storage); // Closure dropped here.
+            },
+            storage_tag: vtable_storage_tag::<F>,
+            executor_tag: || ExecutorTag::FnMut,
+        };
+
+        self.store_impl(vtable, f);
     }
 
     /// Stores the closure `f` in the [`holder`] for later execution with [`execute_once`].
@@ -397,13 +387,16 @@ impl ClosureHolder {
     where
         F: FnOnce(&A) + 'a,
     {
-        self.store_impl(
-            |storage, arg| {
+        let vtable = &ClosureVTable {
+            execute: |storage, arg| {
                 (Self::take_closure::<F>(storage))(Self::arg(arg)); // Closure dropped here.
             },
-            ExecutorTag::FnOnce,
-            f,
-        );
+            drop: |_| {},
+            storage_tag: vtable_storage_tag::<F>,
+            executor_tag: || ExecutorTag::FnOnce,
+        };
+
+        self.store_impl(vtable, f);
     }
 
     /// Stores the closure `f` in the [`holder`] for later execution with [`execute_once_mut`].
@@ -427,20 +420,23 @@ impl ClosureHolder {
     where
         F: FnOnce(&mut A) + 'a,
     {
-        self.store_impl(
-            |storage, arg| {
+        let vtable = &ClosureVTable {
+            execute: |storage, arg| {
                 (Self::take_closure::<F>(storage))(Self::arg(arg)); // Closure dropped here.
             },
-            ExecutorTag::FnOnceMut,
-            f,
-        );
+            drop: |_| {},
+            storage_tag: vtable_storage_tag::<F>,
+            executor_tag: || ExecutorTag::FnOnceMut,
+        };
+
+        self.store_impl(vtable, f);
     }
 
     /// If the [`holder`] is not empty, returns `true`; otherwise returns `false`.
     ///
     /// [`holder`]: struct.ClosureHolder.html
     pub fn is_none(&self) -> bool {
-        self.discriminant.executor_tag().is_none()
+        self.executor_tag().is_none()
     }
 
     /// If the [`holder`] is not empty and was stored via [`new`] \ [`store`],
@@ -451,7 +447,7 @@ impl ClosureHolder {
     /// [`store`]: #method.store
     /// [`execute`]: #method.execute
     pub fn is_some(&self) -> bool {
-        self.discriminant.executor_tag().is_some()
+        self.executor_tag().is_some()
     }
 
     /// If the [`holder`] is not empty and was stored via [`once`] \ [`store_once`],
@@ -462,7 +458,7 @@ impl ClosureHolder {
     /// [`store_once`]: #method.store_once
     /// [`execute_once`]: #method.execute_once
     pub fn is_once(&self) -> bool {
-        self.discriminant.executor_tag().is_once()
+        self.executor_tag().is_once()
     }
 
     /// If the [`holder`] is not empty and was stored via [`new_mut`] \ [`store_mut`],
@@ -473,7 +469,7 @@ impl ClosureHolder {
     /// [`store_mut`]: #method.store
     /// [`execute_mut`]: #method.execute_mut
     pub fn is_mut(&self) -> bool {
-        self.discriminant.executor_tag().is_mut()
+        self.executor_tag().is_mut()
     }
 
     /// If the [`holder`] is not empty and was stored via [`once_mut`] \ [`store_once_mut`],
@@ -484,7 +480,7 @@ impl ClosureHolder {
     /// [`store_once_mut`]: #method.store
     /// [`execute_once_mut`]: #method.execute_once_mut
     pub fn is_once_mut(&self) -> bool {
-        self.discriminant.executor_tag().is_once_mut()
+        self.executor_tag().is_once_mut()
     }
 
     /// If the [`holder`] is not empty and was stored via [`new`] \ [`store`],
@@ -591,7 +587,7 @@ impl ClosureHolder {
     /// [`new`]: #method.new
     /// [`store`]: #method.store
     pub unsafe fn execute<'a, A>(&mut self, arg: &'a A) {
-        match self.discriminant.executor_tag() {
+        match self.executor_tag() {
             ExecutorTag::None => panic!("Tried to execute an empty closure."),
             ExecutorTag::FnOnce => {
                 panic!("Tried to execute an `FnOnce` immutable arg closure via `execute`.")
@@ -605,7 +601,7 @@ impl ClosureHolder {
             ExecutorTag::Fn => {}
         };
 
-        (self.executor)(self.storage(), arg as *const _ as *mut _);
+        (self.vtable.execute)(self.storage(), arg as *const _ as *mut _);
     }
 
     /// Executes the stored closure unconditionally.
@@ -629,7 +625,7 @@ impl ClosureHolder {
     /// [`store_once`]: #method.store_once
     /// [`cleared`]: #method.clear
     pub unsafe fn execute_once<'a, A>(&mut self, arg: &'a A) {
-        match self.discriminant.executor_tag() {
+        match self.executor_tag() {
             ExecutorTag::None => panic!("Tried to execute an empty closure."),
             ExecutorTag::Fn => {
                 panic!("Tried to execute an `FnMut` immutable arg closure via `execute_once`.")
@@ -643,12 +639,10 @@ impl ClosureHolder {
             ExecutorTag::FnOnce => {}
         };
 
-        (self.executor)(self.storage(), arg as *const _ as *mut _);
+        (self.vtable.execute)(self.storage(), arg as *const _ as *mut _);
 
         // Do not run the drop handler in `clear`.
-        self.discriminant.set_executor_tag(ExecutorTag::None);
-
-        self.clear();
+        self.clear_impl(false);
     }
 
     /// Executes the stored closure unconditionally.
@@ -669,7 +663,7 @@ impl ClosureHolder {
     /// [`new_mut`]: #method.new_mut
     /// [`store_mut`]: #method.store_mut
     pub unsafe fn execute_mut<'a, A>(&mut self, arg: &'a mut A) {
-        match self.discriminant.executor_tag() {
+        match self.executor_tag() {
             ExecutorTag::None => panic!("Tried to execute an empty closure."),
             ExecutorTag::Fn => {
                 panic!("Tried to execute an `FnMut` immutable arg closure via `execute_mut`.")
@@ -683,7 +677,7 @@ impl ClosureHolder {
             ExecutorTag::FnMut => {}
         };
 
-        (self.executor)(self.storage(), arg as *mut _ as *mut _);
+        (self.vtable.execute)(self.storage(), arg as *mut _ as *mut _);
     }
 
     /// Executes the stored closure unconditionally.
@@ -707,7 +701,7 @@ impl ClosureHolder {
     /// [`store_once_mut`]: #method.store_once_mut
     /// [`cleared`]: #method.clear
     pub unsafe fn execute_once_mut<'a, A>(&mut self, arg: &'a mut A) {
-        match self.discriminant.executor_tag() {
+        match self.executor_tag() {
             ExecutorTag::None => panic!("Tried to execute an empty closure."),
             ExecutorTag::Fn => {
                 panic!("Tried to execute an `FnMut` immutable arg closure via `execute_once_mut`.")
@@ -721,12 +715,10 @@ impl ClosureHolder {
             ExecutorTag::FnOnceMut => {}
         };
 
-        (self.executor)(self.storage(), arg as *mut _ as *mut _);
+        (self.vtable.execute)(self.storage(), arg as *mut _ as *mut _);
 
         // Do not run the drop handler in `clear`.
-        self.discriminant.set_executor_tag(ExecutorTag::None);
-
-        self.clear();
+        self.clear_impl(false);
     }
 
     /// Clears the [`holder`].
@@ -735,30 +727,10 @@ impl ClosureHolder {
     ///
     /// [`holder`]: struct.ClosureHolder.html
     pub unsafe fn clear(&mut self) {
-        // `FnMut` closures need a drop handler.
-        // `FnOnce` closures are dropped when executed.
-        match self.discriminant.executor_tag() {
-            ExecutorTag::Fn | ExecutorTag::FnMut => {
-                (self.drop_handler)(self.storage());
-            }
-            ExecutorTag::FnOnce | ExecutorTag::FnOnceMut => {}
-            ExecutorTag::None => {}
-        }
-
-        if self.discriminant.storage_tag() == StorageTag::Dynamic {
-            let storage = Box::from_raw(self.storage._dynamic.0);
-            mem::drop(storage);
-        }
-
-        self.executor = |_, _| {};
-        self.drop_handler = |_| {};
-
-        self.storage = Default::default();
-
-        self.discriminant = Discriminant::new(StorageTag::Static, ExecutorTag::None);
+        self.clear_impl(true)
     }
 
-    unsafe fn store_closure<'a, F: Sized>(storage: &mut StorageUnion, f: F) -> StorageTag {
+    unsafe fn store_closure<'a, F: Sized>(&mut self, f: F) {
         let size = mem::size_of::<F>();
 
         if size > STORAGE_SIZE {
@@ -766,40 +738,48 @@ impl ClosureHolder {
 
             ptr::write::<F>((*ptr).as_mut_ptr() as *mut _, f);
 
-            storage._dynamic = DynamicStorage(ptr);
+            self.storage._dynamic = DynamicStorage(ptr);
 
-            StorageTag::Dynamic
+            debug_assert_eq!(self.storage_tag(), StorageTag::Dynamic);
         } else {
-            ptr::write::<F>(storage._static.0.as_mut_ptr() as *mut _, f);
+            ptr::write::<F>(self.storage._static.0.as_mut_ptr() as *mut _, f);
 
-            StorageTag::Static
+            debug_assert_eq!(self.storage_tag(), StorageTag::Static);
         }
     }
 
-    unsafe fn store_impl<F: Sized>(&mut self, executor: Executor, executor_tag: ExecutorTag, f: F) {
+    unsafe fn store_impl<F: Sized>(&mut self, vtable: &'static ClosureVTable, f: F) {
         assert!(
             self.is_none(),
             "Tried to store a closure in an occupied `ClosureHolder`."
         );
 
-        self.executor = executor;
+        self.vtable = vtable;
 
+        self.store_closure(f);
+    }
+
+    unsafe fn clear_impl(&mut self, drop: bool) {
         // `FnMut` closures need a drop handler.
         // `FnOnce` closures are dropped when executed.
-        match executor_tag {
+        match self.executor_tag() {
             ExecutorTag::Fn | ExecutorTag::FnMut => {
-                self.drop_handler = |storage| {
-                    let f = Self::take_closure::<F>(storage);
-                    mem::drop(f);
-                };
+                if drop {
+                    (self.vtable.drop)(self.storage());
+                }
             }
             ExecutorTag::FnOnce | ExecutorTag::FnOnceMut => {}
-            ExecutorTag::None => unreachable!(),
+            ExecutorTag::None => {}
         }
 
-        let storage_tag = Self::store_closure(&mut self.storage, f);
+        if self.storage_tag() == StorageTag::Dynamic {
+            let storage = Box::from_raw(self.storage._dynamic.0);
+            mem::drop(storage);
+        }
 
-        self.discriminant = Discriminant::new(storage_tag, executor_tag);
+        self.vtable = default_vtable();
+
+        self.storage = Default::default();
     }
 
     unsafe fn closure<F>(storage: &mut [u8]) -> &mut F {
@@ -815,17 +795,25 @@ impl ClosureHolder {
     }
 
     unsafe fn storage(&mut self) -> &mut [u8] {
-        match self.discriminant.storage_tag() {
+        match self.storage_tag() {
             StorageTag::Static => self.storage._static.0.as_mut(),
             StorageTag::Dynamic => &mut *self.storage._dynamic.0,
         }
+    }
+
+    fn storage_tag(&self) -> StorageTag {
+        (self.vtable.storage_tag)()
+    }
+
+    fn executor_tag(&self) -> ExecutorTag {
+        (self.vtable.executor_tag)()
     }
 
     #[cfg(test)]
     fn is_static(&self) -> bool {
         assert!(!self.is_none());
 
-        if self.discriminant.storage_tag() == StorageTag::Static {
+        if self.storage_tag() == StorageTag::Static {
             true
         } else {
             false
@@ -836,7 +824,7 @@ impl ClosureHolder {
     fn is_dynamic(&self) -> bool {
         assert!(!self.is_none());
 
-        if self.discriminant.storage_tag() == StorageTag::Dynamic {
+        if self.storage_tag() == StorageTag::Dynamic {
             true
         } else {
             false
@@ -856,19 +844,6 @@ impl Drop for ClosureHolder {
             self.clear();
         }
     }
-}
-
-/// Number of bits needed to represent `count` enum states.
-const fn num_bits(count: u8) -> u8 {
-    8 - (count - 1).leading_zeros() as u8
-}
-
-fn read_bits(source: u8, num_bits_to_read: u8, offset: u8) -> u8 {
-    debug_assert!((num_bits_to_read + offset) <= 8);
-
-    let read_mask = (1 << num_bits_to_read) - 1;
-
-    (source >> offset) & read_mask
 }
 
 #[cfg(test)]
