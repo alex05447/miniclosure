@@ -1643,6 +1643,7 @@ mod tests {
                 let mut h = ClosureHolder::new(move |_arg: &usize| {
                     res.foo();
                 });
+                assert!(h.is_static());
 
                 h.execute(&0usize);
                 h.execute(&0usize);
@@ -1705,6 +1706,7 @@ mod tests {
 
                     println!("{}", capture.len());
                 });
+                assert!(h.is_dynamic());
 
                 h.execute(&0usize);
                 h.execute(&0usize);
@@ -1763,6 +1765,7 @@ mod tests {
                 let mut h = ClosureHolder::once(move |_arg: &usize| {
                     res.foo();
                 });
+                assert!(h.is_static());
 
                 // Closure dropped here.
                 h.execute_once(&0usize);
@@ -1821,6 +1824,7 @@ mod tests {
 
                     println!("{}", capture.len());
                 });
+                assert!(h.is_dynamic());
 
                 // Closure dropped here, boxed storage freed.
                 h.execute_once(&0usize);
