@@ -1,9 +1,9 @@
-use std::mem::{self, size_of};
-use std::ptr;
-
-use num_derive::{FromPrimitive, ToPrimitive};
-use static_assertions::{assert_eq_size, const_assert_eq};
-use strum_macros::EnumCount;
+use {
+    std::{mem::{self, size_of}, ptr},
+    num_derive::{FromPrimitive, ToPrimitive},
+    static_assertions::{assert_eq_size, const_assert_eq},
+    strum_macros::EnumCount
+};
 
 /// Static function which
 /// 1) unpacks the correct closure type from the raw byte buffer,
@@ -14,7 +14,7 @@ use strum_macros::EnumCount;
 /// and the pointer to type-erased closure argument.
 /// It's up to the user to ensure the argument is of type the closure expects.
 ///
-/// [`ClosureHolder`]: #struct.ClosureHolder.html
+/// [`ClosureHolder`]: struct.ClosureHolder.html
 type Executor = fn(&mut [u8], *mut ());
 
 /// Static function which
@@ -23,7 +23,7 @@ type Executor = fn(&mut [u8], *mut ());
 ///
 /// Gets passed the raw closure capture buffer from the [`ClosureHolder`], static or dynamic.
 ///
-/// [`ClosureHolder`]: #struct.ClosureHolder.html
+/// [`ClosureHolder`]: struct.ClosureHolder.html
 type DropHandler = fn(&mut [u8]);
 
 /// Vtable struct for a concrete closure type
@@ -581,14 +581,14 @@ impl ClosureHolder {
     /// # Panics
     ///
     /// Panics if the [`holder`] is empty.
-    /// Panics if the closure was not stored via [`new`] \ [`store`].
+    /// Panics if the closure was stored via [`new`] \ [`store`].
     ///
     /// [`holder`]: struct.ClosureHolder.html
     /// [`new`]: #method.new
     /// [`store`]: #method.store
     pub unsafe fn execute<'a, A>(&mut self, arg: &'a A) {
         match self.executor_tag() {
-            ExecutorTag::None => panic!("Tried to execute an empty closure."),
+            ExecutorTag::None => panic!("tried to execute an empty closure"),
             ExecutorTag::FnOnce => {
                 panic!("Tried to execute an `FnOnce` immutable arg closure via `execute`.")
             }
@@ -601,6 +601,24 @@ impl ClosureHolder {
             ExecutorTag::Fn => {}
         };
 
+        self.execute_unchecked(arg);
+    }
+
+    /// Executes the stored closure unconditionally.
+    ///
+    /// May only be called for closures stored via [`new`] \ [`store`].
+    ///
+    /// # Safety
+    ///
+    /// The caller guarantees that the function is passed the same argument type
+    /// as the one used in the previous call to [`new`] \ [`store`];
+    /// that the [`holder`] is not empty;
+    /// that the closure was not stored via [`new`] \ [`store`].
+    ///
+    /// [`holder`]: struct.ClosureHolder.html
+    /// [`new`]: #method.new
+    /// [`store`]: #method.store
+    pub unsafe fn execute_unchecked<'a, A>(&mut self, arg: &'a A) {
         (self.vtable.execute)(self.storage(), arg as *const _ as *mut _);
     }
 
@@ -626,19 +644,40 @@ impl ClosureHolder {
     /// [`cleared`]: #method.clear
     pub unsafe fn execute_once<'a, A>(&mut self, arg: &'a A) {
         match self.executor_tag() {
-            ExecutorTag::None => panic!("Tried to execute an empty closure."),
+            ExecutorTag::None => panic!("tried to execute an empty closure"),
             ExecutorTag::Fn => {
-                panic!("Tried to execute an `FnMut` immutable arg closure via `execute_once`.")
+                panic!("tried to execute an `FnMut` immutable arg closure via `execute_once`")
             }
             ExecutorTag::FnMut => {
-                panic!("Tried to execute an `FnMut` mutable arg closure via `execute_once`.")
+                panic!("tried to execute an `FnMut` mutable arg closure via `execute_once`")
             }
             ExecutorTag::FnOnceMut => {
-                panic!("Tried to execute an `FnOnce` mutable arg closure via `execute_once`.")
+                panic!("tried to execute an `FnOnce` mutable arg closure via `execute_once`")
             }
             ExecutorTag::FnOnce => {}
         };
 
+        self.execute_once_unchecked(arg);
+    }
+
+    /// Executes the stored closure unconditionally.
+    ///
+    /// May only be called for closures stored via [`once`] \ [`store_once`].
+    ///
+    /// The [`holder`] becomes empty / [`cleared`] after this call.
+    ///
+    /// # Safety
+    ///
+    /// The caller guarantees that the function is passed the same argument type
+    /// as the one used in the previous call to [`once`] \ [`store_once`];
+    /// that the [`holder`] is not empty;
+    /// that the closure was stored via [`once`] \ [`store_once`].
+    ///
+    /// [`holder`]: struct.ClosureHolder.html
+    /// [`once`]: #method.once
+    /// [`store_once`]: #method.store_once
+    /// [`cleared`]: #method.clear
+    pub unsafe fn execute_once_unchecked<'a, A>(&mut self, arg: &'a A) {
         (self.vtable.execute)(self.storage(), arg as *const _ as *mut _);
 
         // Do not run the drop handler in `clear`.
@@ -664,19 +703,37 @@ impl ClosureHolder {
     /// [`store_mut`]: #method.store_mut
     pub unsafe fn execute_mut<'a, A>(&mut self, arg: &'a mut A) {
         match self.executor_tag() {
-            ExecutorTag::None => panic!("Tried to execute an empty closure."),
+            ExecutorTag::None => panic!("tried to execute an empty closure"),
             ExecutorTag::Fn => {
-                panic!("Tried to execute an `FnMut` immutable arg closure via `execute_mut`.")
+                panic!("tried to execute an `FnMut` immutable arg closure via `execute_mut`")
             }
             ExecutorTag::FnOnce => {
-                panic!("Tried to execute an `FnOnce` immutable arg closure via `execute_mut`.")
+                panic!("tried to execute an `FnOnce` immutable arg closure via `execute_mut`")
             }
             ExecutorTag::FnOnceMut => {
-                panic!("Tried to execute an `FnOnce` mutable arg closure via `execute_mut`.")
+                panic!("tried to execute an `FnOnce` mutable arg closure via `execute_mut`")
             }
             ExecutorTag::FnMut => {}
         };
 
+        self.execute_mut_unchecked(arg);
+    }
+
+    /// Executes the stored closure unconditionally.
+    ///
+    /// May only be called for closures stored via [`new_mut`] \ [`store_mut`].
+    ///
+    /// # Safety
+    ///
+    /// The caller guarantees that the function is passed the same argument type
+    /// as the one used in the previous call to [`new_mut`] \ [`store_mut`];
+    /// that the [`holder`] is not empty;
+    /// that the closure was stored via [`new_mut`] \ [`store_mut`].
+    ///
+    /// [`holder`]: struct.ClosureHolder.html
+    /// [`new_mut`]: #method.new_mut
+    /// [`store_mut`]: #method.store_mut
+    pub unsafe fn execute_mut_unchecked<'a, A>(&mut self, arg: &'a mut A) {
         (self.vtable.execute)(self.storage(), arg as *mut _ as *mut _);
     }
 
@@ -702,19 +759,40 @@ impl ClosureHolder {
     /// [`cleared`]: #method.clear
     pub unsafe fn execute_once_mut<'a, A>(&mut self, arg: &'a mut A) {
         match self.executor_tag() {
-            ExecutorTag::None => panic!("Tried to execute an empty closure."),
+            ExecutorTag::None => panic!("tried to execute an empty closure"),
             ExecutorTag::Fn => {
-                panic!("Tried to execute an `FnMut` immutable arg closure via `execute_once_mut`.")
+                panic!("tried to execute an `FnMut` immutable arg closure via `execute_once_mut`")
             }
             ExecutorTag::FnMut => {
-                panic!("Tried to execute an `FnMut` mutable arg closure via `execute_once_mut`.")
+                panic!("tried to execute an `FnMut` mutable arg closure via `execute_once_mut`")
             }
             ExecutorTag::FnOnce => {
-                panic!("Tried to execute an `FnOnce` immutable arg closure via `execute_once_mut`.")
+                panic!("tried to execute an `FnOnce` immutable arg closure via `execute_once_mut`")
             }
             ExecutorTag::FnOnceMut => {}
         };
 
+        self.execute_once_mut_unchecked(arg);
+    }
+
+    /// Executes the stored closure unconditionally.
+    ///
+    /// May only be called for closures stored via [`once_mut`] \ [`store_once_mut`].
+    ///
+    /// The [`holder`] becomes empty / [`cleared`] after this call.
+    ///
+    /// # Safety
+    ///
+    /// The caller guarantees that the function is passed the same argument type
+    /// as the one used in the previous call to [`once_mut`] \ [`store_once_mut`];
+    /// that the [`holder`] is not empty;
+    /// that the closure was stored via [`once_mut`] \ [`store_once_mut`].
+    ///
+    /// [`holder`]: struct.ClosureHolder.html
+    /// [`once_mut`]: #method.once_mut
+    /// [`store_once_mut`]: #method.store_once_mut
+    /// [`cleared`]: #method.clear
+    pub unsafe fn execute_once_mut_unchecked<'a, A>(&mut self, arg: &'a mut A) {
         (self.vtable.execute)(self.storage(), arg as *mut _ as *mut _);
 
         // Do not run the drop handler in `clear`.
@@ -751,7 +829,7 @@ impl ClosureHolder {
     unsafe fn store_impl<F: Sized>(&mut self, vtable: &'static ClosureVTable, f: F) {
         assert!(
             self.is_none(),
-            "Tried to store a closure in an occupied `ClosureHolder`."
+            "tried to store a closure in an occupied `ClosureHolder`"
         );
 
         self.vtable = vtable;
@@ -867,7 +945,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "Tried to store a closure in an occupied `ClosureHolder`.")]
+    #[should_panic(expected = "tried to store a closure in an occupied `ClosureHolder`")]
     fn double_store() {
         let mut h = unsafe { ClosureHolder::new(|_arg: &usize| println!("Hello")) };
 
@@ -877,7 +955,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "Tried to store a closure in an occupied `ClosureHolder`.")]
+    #[should_panic(expected = "tried to store a closure in an occupied `ClosureHolder`")]
     fn double_store_mut() {
         let mut h = unsafe { ClosureHolder::new_mut(|_arg: &mut usize| println!("Hello")) };
 
@@ -887,7 +965,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "Tried to store a closure in an occupied `ClosureHolder`.")]
+    #[should_panic(expected = "tried to store a closure in an occupied `ClosureHolder`")]
     fn double_store_once() {
         let mut h = unsafe { ClosureHolder::once(|_arg: &usize| println!("Hello")) };
 
@@ -897,7 +975,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "Tried to store a closure in an occupied `ClosureHolder`.")]
+    #[should_panic(expected = "tried to store a closure in an occupied `ClosureHolder`")]
     fn double_store_once_mut() {
         let mut h = unsafe { ClosureHolder::once_mut(|_arg: &mut usize| println!("Hello")) };
 
@@ -1362,7 +1440,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "Tried to execute an empty closure.")]
+    #[should_panic(expected = "tried to execute an empty closure")]
     fn execute_empty() {
         let mut h = ClosureHolder::empty();
 
@@ -1411,7 +1489,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "Tried to execute an empty closure.")]
+    #[should_panic(expected = "tried to execute an empty closure")]
     fn execute_once_empty() {
         let mut h = ClosureHolder::empty();
 
@@ -1422,7 +1500,7 @@ mod tests {
 
     #[test]
     #[should_panic(
-        expected = "Tried to execute an `FnMut` immutable arg closure via `execute_once`."
+        expected = "tried to execute an `FnMut` immutable arg closure via `execute_once`"
     )]
     fn execute_once_fn() {
         unsafe {
@@ -1437,7 +1515,7 @@ mod tests {
 
     #[test]
     #[should_panic(
-        expected = "Tried to execute an `FnMut` mutable arg closure via `execute_once`."
+        expected = "tried to execute an `FnMut` mutable arg closure via `execute_once`"
     )]
     fn execute_once_fn_mut() {
         unsafe {
@@ -1452,7 +1530,7 @@ mod tests {
 
     #[test]
     #[should_panic(
-        expected = "Tried to execute an `FnOnce` mutable arg closure via `execute_once`."
+        expected = "tried to execute an `FnOnce` mutable arg closure via `execute_once`"
     )]
     fn execute_once_fn_once_mut() {
         unsafe {
@@ -1466,7 +1544,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "Tried to execute an empty closure.")]
+    #[should_panic(expected = "tried to execute an empty closure")]
     fn execute_mut_empty() {
         let mut h = ClosureHolder::empty();
 
@@ -1477,7 +1555,7 @@ mod tests {
 
     #[test]
     #[should_panic(
-        expected = "Tried to execute an `FnMut` immutable arg closure via `execute_mut`."
+        expected = "tried to execute an `FnMut` immutable arg closure via `execute_mut`"
     )]
     fn execute_mut_fn() {
         unsafe {
@@ -1492,7 +1570,7 @@ mod tests {
 
     #[test]
     #[should_panic(
-        expected = "Tried to execute an `FnOnce` immutable arg closure via `execute_mut`."
+        expected = "tried to execute an `FnOnce` immutable arg closure via `execute_mut`"
     )]
     fn execute_mut_fn_once() {
         unsafe {
@@ -1507,7 +1585,7 @@ mod tests {
 
     #[test]
     #[should_panic(
-        expected = "Tried to execute an `FnOnce` mutable arg closure via `execute_mut`."
+        expected = "tried to execute an `FnOnce` mutable arg closure via `execute_mut`"
     )]
     fn execute_mut_fn_once_mut() {
         unsafe {
@@ -1521,7 +1599,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "Tried to execute an empty closure.")]
+    #[should_panic(expected = "tried to execute an empty closure")]
     fn execute_once_mut_empty() {
         let mut h = ClosureHolder::empty();
 
@@ -1532,7 +1610,7 @@ mod tests {
 
     #[test]
     #[should_panic(
-        expected = "Tried to execute an `FnMut` immutable arg closure via `execute_once_mut`."
+        expected = "tried to execute an `FnMut` immutable arg closure via `execute_once_mut`"
     )]
     fn execute_once_mut_fn() {
         unsafe {
@@ -1547,7 +1625,7 @@ mod tests {
 
     #[test]
     #[should_panic(
-        expected = "Tried to execute an `FnMut` mutable arg closure via `execute_once_mut`."
+        expected = "tried to execute an `FnMut` mutable arg closure via `execute_once_mut`"
     )]
     fn execute_once_mut_fn_mut() {
         unsafe {
@@ -1562,7 +1640,7 @@ mod tests {
 
     #[test]
     #[should_panic(
-        expected = "Tried to execute an `FnOnce` immutable arg closure via `execute_once_mut`."
+        expected = "tried to execute an `FnOnce` immutable arg closure via `execute_once_mut`"
     )]
     fn execute_once_mut_fn_once() {
         unsafe {
