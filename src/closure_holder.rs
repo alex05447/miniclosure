@@ -391,7 +391,9 @@ impl ClosureHolder {
             execute: |storage, arg| {
                 (Self::take_closure::<F>(storage))(Self::arg(arg)); // Closure dropped here.
             },
-            drop: |_| {},
+            drop: |storage| {
+                Self::take_closure::<F>(storage); // Closure dropped here.
+            },
             storage_tag: storage_tag::<F>,
             executor_tag: || ExecutorTag::FnOnce,
         };
@@ -424,7 +426,9 @@ impl ClosureHolder {
             execute: |storage, arg| {
                 (Self::take_closure::<F>(storage))(Self::arg(arg)); // Closure dropped here.
             },
-            drop: |_| {},
+            drop: |storage| {
+                Self::take_closure::<F>(storage); // Closure dropped here.
+            },
             storage_tag: storage_tag::<F>,
             executor_tag: || ExecutorTag::FnOnceMut,
         };
@@ -852,14 +856,11 @@ impl ClosureHolder {
     }
 
     unsafe fn clear_impl(vt: &'static ClosureVTable, storage: &mut StorageUnion, drop: bool) {
-        // `FnMut` closures need a drop handler.
-        // `FnOnce` closures are dropped when executed.
         if drop {
             match Self::executor_tag(vt) {
-                ExecutorTag::Fn | ExecutorTag::FnMut => {
+                ExecutorTag::Fn | ExecutorTag::FnMut | ExecutorTag::FnOnce | ExecutorTag::FnOnceMut => {
                     (vt.drop)(Self::storage(vt, storage));
                 }
-                ExecutorTag::FnOnce | ExecutorTag::FnOnceMut => {}
                 ExecutorTag::None => {}
             }
         }
@@ -1698,6 +1699,7 @@ mod tests {
 
         assert_eq!(Resource::num_resources(), 0);
 
+        // `Fn` closures - cleaned up when dropped.
         {
             let res = Resource::new();
             assert_eq!(Resource::num_resources(), 1);
@@ -1708,12 +1710,126 @@ mod tests {
                 });
                 assert!(h.is_static());
 
+                assert_eq!(Resource::num_resources(), 1);
+
                 h.execute(&0usize);
                 h.execute(&0usize);
 
                 assert_eq!(Resource::num_resources(), 1);
 
                 // Closure dropped here, drop handler called.
+            }
+
+            assert_eq!(Resource::num_resources(), 0);
+        }
+
+        // `FnMut` closures - cleaned up when dropped.
+        {
+            let res = Resource::new();
+            assert_eq!(Resource::num_resources(), 1);
+
+            unsafe {
+                let mut h = ClosureHolder::new_mut(move |_arg: &mut usize| {
+                    res.foo();
+                });
+                assert!(h.is_static());
+
+                assert_eq!(Resource::num_resources(), 1);
+
+                h.execute_mut(&mut 0usize);
+                h.execute_mut(&mut 0usize);
+
+                assert_eq!(Resource::num_resources(), 1);
+
+                // Closure dropped here, drop handler called.
+            }
+
+            assert_eq!(Resource::num_resources(), 0);
+        }
+
+        // `FnOnce` closures - cleaned up when executed.
+        {
+            let res = Resource::new();
+            assert_eq!(Resource::num_resources(), 1);
+
+            unsafe {
+                let mut h = ClosureHolder::once(move |_arg: &usize| {
+                    res.foo();
+                });
+                assert!(h.is_static());
+
+                assert_eq!(Resource::num_resources(), 1);
+
+                h.execute_once(&0usize); // Closure dropped here.
+
+                assert_eq!(Resource::num_resources(), 0);
+
+                std::mem::drop(h); // Safe to drop - there won't be a double free, as we fixed up the vtable after closure execution.
+            }
+
+            assert_eq!(Resource::num_resources(), 0);
+        }
+
+        // `FnOnceMut` closures - cleaned up when executed.
+        {
+            let res = Resource::new();
+            assert_eq!(Resource::num_resources(), 1);
+
+            unsafe {
+                let mut h = ClosureHolder::once_mut(move |_arg: &mut usize| {
+                    res.foo();
+                });
+                assert!(h.is_static());
+
+                assert_eq!(Resource::num_resources(), 1);
+
+                h.execute_once_mut(&mut 0usize); // Closure dropped here.
+
+                assert_eq!(Resource::num_resources(), 0);
+
+                std::mem::drop(h); // Safe to drop - there won't be a double free, as we fixed up the vtable after closure execution.
+            }
+
+            assert_eq!(Resource::num_resources(), 0);
+        }
+
+        // `FnOnce` closures - cleaned up when dropped without being executed.
+        {
+            let res = Resource::new();
+            assert_eq!(Resource::num_resources(), 1);
+
+            unsafe {
+                let h = ClosureHolder::once(move |_arg: &usize| {
+                    res.foo();
+                });
+                assert!(h.is_static());
+
+                assert_eq!(Resource::num_resources(), 1);
+
+                std::mem::drop(h); // Closure dropped here.
+
+                assert_eq!(Resource::num_resources(), 0);
+            }
+
+            assert_eq!(Resource::num_resources(), 0);
+        }
+
+        // `FnOnceMut` closures - cleaned up when dropped without being executed.
+        {
+            let res = Resource::new();
+            assert_eq!(Resource::num_resources(), 1);
+
+            unsafe {
+                let h = ClosureHolder::once_mut(move |_arg: &mut usize| {
+                    res.foo();
+                });
+                assert!(h.is_static());
+
+                assert_eq!(Resource::num_resources(), 1);
+
+                std::mem::drop(h); // Closure dropped here.
+
+                assert_eq!(Resource::num_resources(), 0);
             }
 
             assert_eq!(Resource::num_resources(), 0);
@@ -1757,11 +1873,12 @@ mod tests {
 
         assert_eq!(Resource::num_resources(), 0);
 
+        let capture = [0u8; HOLDER_SIZE];
+
+        // `Fn` closures - cleaned up when dropped.
         {
             let res = Resource::new();
             assert_eq!(Resource::num_resources(), 1);
-
-            let capture = [0u8; HOLDER_SIZE];
 
             unsafe {
                 let mut h = ClosureHolder::new(move |_arg: &usize| {
@@ -1771,12 +1888,136 @@ mod tests {
                 });
                 assert!(h.is_dynamic());
 
+                assert_eq!(Resource::num_resources(), 1);
+
                 h.execute(&0usize);
                 h.execute(&0usize);
 
                 assert_eq!(Resource::num_resources(), 1);
 
                 // Closure dropped here, drop handler called, boxed storage freed.
+            }
+
+            assert_eq!(Resource::num_resources(), 0);
+        }
+
+        // `FnMut` closures - cleaned up when dropped.
+        {
+            let res = Resource::new();
+            assert_eq!(Resource::num_resources(), 1);
+
+            unsafe {
+                let mut h = ClosureHolder::new_mut(move |_arg: &mut usize| {
+                    res.foo();
+
+                    println!("{}", capture.len());
+                });
+                assert!(h.is_dynamic());
+
+                assert_eq!(Resource::num_resources(), 1);
+
+                h.execute_mut(&mut 0usize);
+                h.execute_mut(&mut 0usize);
+
+                assert_eq!(Resource::num_resources(), 1);
+
+                // Closure dropped here, drop handler called, boxed storage freed.
+            }
+
+            assert_eq!(Resource::num_resources(), 0);
+        }
+
+        // `FnOnce` closures - cleaned up when executed.
+        {
+            let res = Resource::new();
+            assert_eq!(Resource::num_resources(), 1);
+
+            unsafe {
+                let mut h = ClosureHolder::once(move |_arg: &usize| {
+                    res.foo();
+
+                    println!("{}", capture.len());
+                });
+                assert!(h.is_dynamic());
+
+                assert_eq!(Resource::num_resources(), 1);
+
+                h.execute_once(&0usize); // Closure dropped here.
+
+                assert_eq!(Resource::num_resources(), 0);
+
+                std::mem::drop(h); // Safe to drop - there won't be a double free, as we fixed up the vtable after closure execution.
+            }
+
+            assert_eq!(Resource::num_resources(), 0);
+        }
+
+        // `FnOnceMut` closures - cleaned up when executed.
+        {
+            let res = Resource::new();
+            assert_eq!(Resource::num_resources(), 1);
+
+            unsafe {
+                let mut h = ClosureHolder::once_mut(move |_arg: &mut usize| {
+                    res.foo();
+
+                    println!("{}", capture.len());
+                });
+                assert!(h.is_dynamic());
+
+                assert_eq!(Resource::num_resources(), 1);
+
+                h.execute_once_mut(&mut 0usize); // Closure dropped here.
+
+                assert_eq!(Resource::num_resources(), 0);
+
+                std::mem::drop(h); // Safe to drop - there won't be a double free, as we fixed up the vtable after closure execution.
+            }
+
+            assert_eq!(Resource::num_resources(), 0);
+        }
+
+        // `FnOnce` closures - cleaned up when dropped without being executed.
+        {
+            let res = Resource::new();
+            assert_eq!(Resource::num_resources(), 1);
+
+            unsafe {
+                let h = ClosureHolder::once(move |_arg: &usize| {
+                    res.foo();
+
+                    println!("{}", capture.len());
+                });
+                assert!(h.is_dynamic());
+
+                assert_eq!(Resource::num_resources(), 1);
+
+                std::mem::drop(h); // Closure dropped here.
+
+                assert_eq!(Resource::num_resources(), 0);
+            }
+
+            assert_eq!(Resource::num_resources(), 0);
+        }
+
+        // `FnOnceMut` closures - cleaned up when dropped without being executed.
+        {
+            let res = Resource::new();
+            assert_eq!(Resource::num_resources(), 1);
+
+            unsafe {
+                let h = ClosureHolder::once_mut(move |_arg: &mut usize| {
+                    res.foo();
+
+                    println!("{}", capture.len());
+                });
+                assert!(h.is_dynamic());
+
+                assert_eq!(Resource::num_resources(), 1);
+
+                std::mem::drop(h); // Closure dropped here.
+
+                assert_eq!(Resource::num_resources(), 0);
             }
 
             assert_eq!(Resource::num_resources(), 0);
