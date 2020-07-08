@@ -1,6 +1,9 @@
 use {
-    std::{mem::{self, size_of}, ptr},
     static_assertions::{assert_eq_size, const_assert_eq},
+    std::{
+        mem::{self, size_of},
+        ptr,
+    },
 };
 
 /// Static function which
@@ -237,7 +240,7 @@ impl ClosureHolder {
     /// [`clear`]: #method.clear
     pub unsafe fn new<F, A>(f: F) -> Self
     where
-        F: FnMut(&A)
+        F: FnMut(&A),
     {
         let mut result = Self::empty();
         result.store(f);
@@ -260,7 +263,7 @@ impl ClosureHolder {
     /// [`clear`]: #method.clear
     pub unsafe fn new_mut<F, A>(f: F) -> Self
     where
-        F: FnMut(&mut A)
+        F: FnMut(&mut A),
     {
         let mut result = Self::empty();
         result.store_mut(f);
@@ -283,7 +286,7 @@ impl ClosureHolder {
     /// [`clear`]: #method.clear
     pub unsafe fn once<F, A>(f: F) -> Self
     where
-        F: FnOnce(&A)
+        F: FnOnce(&A),
     {
         let mut result = Self::empty();
         result.store_once(f);
@@ -306,7 +309,7 @@ impl ClosureHolder {
     /// [`clear`]: #method.clear
     pub unsafe fn once_mut<F, A>(f: F) -> Self
     where
-        F: FnOnce(&mut A)
+        F: FnOnce(&mut A),
     {
         let mut result = Self::empty();
         result.store_once_mut(f);
@@ -333,12 +336,14 @@ impl ClosureHolder {
     /// [`clear`]: #method.clear
     pub unsafe fn store<F, A>(&mut self, f: F)
     where
-        F: FnMut(&A)
+        F: FnMut(&A),
     {
         let vt = &ClosureVTable {
             executor_tag: || ExecutorTag::Fn,
             execute: |h, arg| {
-                (Self::closure::<F>(Self::storage(storage_tag::<F>(), &mut h.storage)))(Self::arg(arg));
+                (Self::closure::<F>(Self::storage(storage_tag::<F>(), &mut h.storage)))(Self::arg(
+                    arg,
+                ));
             },
             drop: |h| {
                 Self::take_closure::<F>(Self::storage(storage_tag::<F>(), &mut h.storage)); // Closure dropped here.
@@ -372,12 +377,14 @@ impl ClosureHolder {
     /// [`clear`]: #method.clear
     pub unsafe fn store_mut<F, A>(&mut self, f: F)
     where
-        F: FnMut(&mut A)
+        F: FnMut(&mut A),
     {
         let vt = &ClosureVTable {
             executor_tag: || ExecutorTag::FnMut,
             execute: |h, arg| {
-                (Self::closure::<F>(Self::storage(storage_tag::<F>(), &mut h.storage)))(Self::arg_mut(arg));
+                (Self::closure::<F>(Self::storage(storage_tag::<F>(), &mut h.storage)))(
+                    Self::arg_mut(arg),
+                );
             },
             drop: |h| {
                 Self::take_closure::<F>(Self::storage(storage_tag::<F>(), &mut h.storage)); // Closure dropped here.
@@ -411,7 +418,7 @@ impl ClosureHolder {
     /// [`clear`]: #method.clear
     pub unsafe fn store_once<F, A>(&mut self, f: F)
     where
-        F: FnOnce(&A)
+        F: FnOnce(&A),
     {
         let vt = &ClosureVTable {
             executor_tag: || ExecutorTag::FnOnce,
@@ -452,7 +459,7 @@ impl ClosureHolder {
     /// [`clear`]: #method.clear
     pub unsafe fn store_once_mut<F, A>(&mut self, f: F)
     where
-        F: FnOnce(&mut A)
+        F: FnOnce(&mut A),
     {
         let vt = &ClosureVTable {
             executor_tag: || ExecutorTag::FnOnceMut,
@@ -870,7 +877,8 @@ impl ClosureHolder {
     /// Frees allocated dynamic storage memory, if any; clears the vtable and the storage.
     unsafe fn clear_impl(&mut self, storage_tag: StorageTag) {
         if storage_tag == StorageTag::Dynamic {
-            Box::from_raw(Self::storage(storage_tag, &mut self.storage) as *mut _); // Boxed storage dropped here.
+            Box::from_raw(Self::storage(storage_tag, &mut self.storage) as *mut _);
+            // Boxed storage dropped here.
         }
 
         self.vt = default_vtable();
@@ -1526,9 +1534,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(
-        expected = "tried to execute an `FnMut` mutable arg closure via `execute_once`"
-    )]
+    #[should_panic(expected = "tried to execute an `FnMut` mutable arg closure via `execute_once`")]
     fn execute_once_fn_mut() {
         unsafe {
             let mut h = ClosureHolder::new_mut(|_arg: &mut usize| {
@@ -1596,9 +1602,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(
-        expected = "tried to execute an `FnOnce` mutable arg closure via `execute_mut`"
-    )]
+    #[should_panic(expected = "tried to execute an `FnOnce` mutable arg closure via `execute_mut`")]
     fn execute_mut_fn_once_mut() {
         unsafe {
             let mut h = ClosureHolder::once_mut(|_arg: &mut usize| {
@@ -2062,6 +2066,7 @@ mod tests {
 
         assert_eq!(Resource::num_resources(), 0);
 
+        // `FnOnce` closures - cleaned up when executed.
         {
             let res = Resource::new();
             assert_eq!(Resource::num_resources(), 1);
@@ -2074,6 +2079,61 @@ mod tests {
 
                 // Closure dropped here.
                 h.execute_once(&0usize);
+
+                assert_eq!(Resource::num_resources(), 0);
+
+                std::mem::drop(h); // Safe to drop - there won't be a double free, as we fixed up the vtable after closure execution.
+            }
+        }
+
+        // `FnOnce` closures - cleaned up when dropped without being executed.
+        {
+            let res = Resource::new();
+            assert_eq!(Resource::num_resources(), 1);
+
+            unsafe {
+                let h = ClosureHolder::once(move |_arg: &usize| {
+                    res.foo();
+                });
+                assert!(h.is_static());
+
+                std::mem::drop(h); // Closure dropped here.
+
+                assert_eq!(Resource::num_resources(), 0);
+            }
+        }
+
+        // `FnOnceMut` closures - cleaned up when executed.
+        {
+            let res = Resource::new();
+            assert_eq!(Resource::num_resources(), 1);
+
+            unsafe {
+                let mut h = ClosureHolder::once_mut(move |_arg: &mut usize| {
+                    res.foo();
+                });
+                assert!(h.is_static());
+
+                h.execute_once_mut(&mut 0usize); // Closure dropped here.
+
+                assert_eq!(Resource::num_resources(), 0);
+
+                std::mem::drop(h); // Safe to drop - there won't be a double free, as we fixed up the vtable after closure execution.
+            }
+        }
+
+        // `FnOnceMut` closures - cleaned up when dropped without being executed.
+        {
+            let res = Resource::new();
+            assert_eq!(Resource::num_resources(), 1);
+
+            unsafe {
+                let h = ClosureHolder::once_mut(move |_arg: &mut usize| {
+                    res.foo();
+                });
+                assert!(h.is_static());
+
+                std::mem::drop(h); // Closure dropped here.
 
                 assert_eq!(Resource::num_resources(), 0);
             }
@@ -2117,6 +2177,7 @@ mod tests {
 
         assert_eq!(Resource::num_resources(), 0);
 
+        // `FnOnce` closures - cleaned up when executed.
         {
             let res = Resource::new();
             assert_eq!(Resource::num_resources(), 1);
@@ -2131,8 +2192,74 @@ mod tests {
                 });
                 assert!(h.is_dynamic());
 
-                // Closure dropped here, boxed storage freed.
-                h.execute_once(&0usize);
+                h.execute_once(&0usize); // Closure dropped here, boxed storage freed.
+
+                assert_eq!(Resource::num_resources(), 0);
+
+                std::mem::drop(h); // Safe to drop - there won't be a double free, as we fixed up the vtable after closure execution.
+            }
+        }
+
+        // `FnOnce` closures - cleaned up when dropped without being executed.
+        {
+            let res = Resource::new();
+            assert_eq!(Resource::num_resources(), 1);
+
+            let capture = [0u8; HOLDER_SIZE];
+
+            unsafe {
+                let h = ClosureHolder::once(move |_arg: &usize| {
+                    res.foo();
+
+                    println!("{}", capture.len());
+                });
+                assert!(h.is_dynamic());
+
+                std::mem::drop(h); // Closure dropped here, boxed storage freed.
+
+                assert_eq!(Resource::num_resources(), 0);
+            }
+        }
+
+        // `FnOnceMut` closures - cleaned up when executed.
+        {
+            let res = Resource::new();
+            assert_eq!(Resource::num_resources(), 1);
+
+            let capture = [0u8; HOLDER_SIZE];
+
+            unsafe {
+                let mut h = ClosureHolder::once_mut(move |_arg: &mut usize| {
+                    res.foo();
+
+                    println!("{}", capture.len());
+                });
+                assert!(h.is_dynamic());
+
+                h.execute_once_mut(&mut 0usize); // Closure dropped here, boxed storage freed.
+
+                assert_eq!(Resource::num_resources(), 0);
+
+                std::mem::drop(h); // Safe to drop - there won't be a double free, as we fixed up the vtable after closure execution.
+            }
+        }
+
+        // `FnOnceMut` closures - cleaned up when dropped without being executed.
+        {
+            let res = Resource::new();
+            assert_eq!(Resource::num_resources(), 1);
+
+            let capture = [0u8; HOLDER_SIZE];
+
+            unsafe {
+                let h = ClosureHolder::once_mut(move |_arg: &mut usize| {
+                    res.foo();
+
+                    println!("{}", capture.len());
+                });
+                assert!(h.is_dynamic());
+
+                std::mem::drop(h); // Closure dropped here, boxed storage freed.
 
                 assert_eq!(Resource::num_resources(), 0);
             }
