@@ -562,7 +562,9 @@ impl ClosureHolder {
     /// as the one used in the previous call to [`new`] \ [`once`] \ [`store`] \ [`store_once`].
     ///
     /// [`holder`]: struct.ClosureHolder.html
+    /// [`new`]: #method.new
     /// [`once`]: #method.once
+    /// [`store`]: #method.store
     /// [`store_once`]: #method.store_once
     /// [`cleared`]: #method.clear
     pub unsafe fn try_execute_once<A>(&mut self, arg: &A) -> bool {
